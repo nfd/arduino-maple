@@ -1,0 +1,6 @@
+syntax: glob
+app.elf
+app.hex
+*.o
+Session.vim
+
