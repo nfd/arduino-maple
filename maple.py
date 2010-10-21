@@ -6,9 +6,9 @@ import select
 import serial
 import time
 
-PORT='/dev/ttyUSB0'
-#PORT='/dev/tty.usbserial-A700ekGi'
-#PORT = 'COM3:'
+PORT='/dev/ttyUSB0'	# Linux
+#PORT='/dev/tty.usbserial-A700ekGi'	# OS X (or similar)
+#PORT = 'COM3:' # Windows
 
 # Device function codes
 FN_CONTROLLER  = 1
@@ -26,6 +26,27 @@ FN_CODE_MAP    = {FN_CONTROLLER: 'CONTROLLER', FN_MEMORY_CARD: "MEMORY_CARD",
 		FN_LCD: "LCD", FN_CLOCK: "CLOCK", FN_MICROPHONE: "MICROPHONE",
 		FN_AR_GUN: "AR_GUN", FN_KEYBOARD: "KEYBOARD", FN_LIGHT_GUN: "LIGHT_GUN",
 		FN_PURU_PURU: "PURU_PURU", FN_MOUSE: "MOUSE"}
+
+# Device commands 
+CMD_INFO          = 0x01
+CMD_INFO_EXT      = 0x02
+CMD_RESET         = 0x03
+CMD_SHUTDOWN      = 0x04
+CMD_INFO_RESP     = 0x05
+CMD_INFO_EXT_RESP = 0x06
+CMD_ACK_RESP      = 0x07
+CMD_XFER_RESP     = 0x08
+CMD_GET_COND      = 0x09
+CMD_GET_MEMINFO   = 0x0A
+CMD_READ          = 0x0B
+CMD_WRITE         = 0x0C
+CMD_SET_COND      = 0x0E
+CMD_NO_RESP       = 0xFF
+CMD_UNSUP_FN_RESP = 0xFE
+CMD_UNKNOWN_RESP  = 0xFD
+CMD_RESEND_RESP   = 0xFC
+CMD_FILE_ERR_RESP = 0xFB
+
 
 # Hardcoded recipient addresses.
 # Controller, main peripheral, port A
@@ -67,6 +88,29 @@ def print_header(data):
 	recipient = ord(data[2])
 	command   = ord(data[3])
 	print "Command %x sender %x recipient %x length %x" % (command, recipient, sender, words)
+
+BUTTONS = ["C", "B", "A", "START", "UP", "DOWN", "LEFT", "RIGHT",
+			"Z", "Y", "X", "D", "UP2", "DOWN2", "LEFT2", "RIGHT2"]
+def print_controller_info(data):
+	print_header(data)
+	data = data[4:]  # Header
+	data = data[4:]  # Func
+	data = data[:-1] # CRC
+	data = swapwords(data)
+	buttons = struct.unpack("<H", data[:2])[0]
+	buttons = ~buttons & 0xffff
+	button_names = []
+	for bit, name in enumerate(BUTTONS):
+		if buttons & (1 << bit):
+			button_names.append(name)
+	print "Ltrig", ord(data[3]),
+	print "Rtrig", ord(data[2]),
+	print "Joy X", ord(data[4]),
+	print "Joy Y", ord(data[5]),
+	print "Joy X2", ord(data[6]),
+	print "Joy Y2", ord(data[7]),
+	print ", ".join(button_names)
+	#print debug_hex(data)
 
 def load_image(filename):
 	data = [0] * (48 * 32 / 8)
@@ -113,7 +157,7 @@ class MapleProxy(object):
 	
 	def deviceInfo(self, address):
 		# cmd 1 = request device information
-		info_bytes = self.transact(1, address, '')
+		info_bytes = self.transact(CMD_INFO, address, '')
 		if info_bytes is None:
 			print "No device found at address:"
 			print hex(address)
@@ -142,12 +186,18 @@ class MapleProxy(object):
 	
 	def writeLCD(self, address, lcddata):
 		assert len(lcddata) == 192
-		data = struct.pack("<II", 4, 0) + lcddata
-		info_bytes = self.transact(12, address, data)
+		data = struct.pack("<II", FN_LCD, 0) + lcddata
+		info_bytes = self.transact(CMD_WRITE, address, data)
 		if info_bytes is None:
 			print "No response to writeLCD"
 		else:
 			print_header(info_bytes[:4])
+	
+	def readController(self, address):
+		data = struct.pack("<I", FN_CONTROLLER)
+		info_bytes = self.transact(CMD_GET_COND, address, data)
+		return info_bytes
+		#print debug_hex(info_bytes)
 
 	def compute_checksum(self, data):
 		checksum = 0
@@ -188,6 +238,11 @@ def test():
 	bus.deviceInfo(ADDRESS_CONTROLLER)
 	bus.deviceInfo(ADDRESS_PERIPH1)
 	bus.writeLCD(ADDRESS_PERIPH1, image)
+
+	print "Play with the controller. Hit ctrl-c when done."
+	while 1:
+		print_controller_info(bus.readController(ADDRESS_CONTROLLER))
+		time.sleep(1)
 
 test()
 
