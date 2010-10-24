@@ -176,7 +176,7 @@ _maple_tx_next_byte:
 	
 	ret
 
-; r22: length
+; r22: length (1 byte)
 ; r23: unused
 ; r24: low order bit of buffer pointer
 ; r25: high order bit of buffer pointer
@@ -186,6 +186,7 @@ maple_tx_raw:
 	; Set pins to output for transmission
 	SBI _SFR_IO_ADDR(DDRB), bitmaple1
 	SBI _SFR_IO_ADDR(DDRB), bitmaple5
+
 
 	RCALL maple_tx_start
 	RCALL maple_tx_data
@@ -291,6 +292,8 @@ maple_rx_raw:
 	; maple_high bitmaple5 
 
 	; Wait for a start sequence
+	timer_on						; rx will start soon
+
 1:	IN rport2, _SFR_IO_ADDR(PINB)
 	BST rport2, bitmaple1			; maple1
 	BRTC 1b							; must be high initially
@@ -298,8 +301,6 @@ maple_rx_raw:
 2:	IN rport2, _SFR_IO_ADDR(PINB)
 	BST rport2, bitmaple1
 	BRTS 2b							; must be low to continue
-
-	timer_on						; rx will start soon
 
 3:	IN rport2, _SFR_IO_ADDR(PINB)
 	BST rport2, bitmaple1			; maple1
@@ -328,11 +329,12 @@ _rx_loop:
 	RJMP _rx_loop			
 
 _maple_rx_raw_watchdog:				; Watchdog bailed us out. We're done!
-	debug_pin_high
+	; debug_pin_high
 	POP r18							;
 	STS TIMSK0, r18					; re-enable Arduino interrupts
 
 	MOVW r24, r26					; end of buffer <- X register
+
 	ret
 
 maple_timer_test:

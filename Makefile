@@ -78,8 +78,8 @@ printsize:
 
 
 # Programming support using avrdude. Settings and variables.
-#PORT = /dev/tty.usbserial-A700ekGi
-PORT = /dev/ttyUSB0
+PORT = /dev/tty.usbserial-A700ekGi
+#PORT = /dev/ttyUSB0
 AVRDUDE_PORT = $(PORT)
 AVRDUDE_WRITE_FLASH = -U flash:w:app.hex
 MCU = atmega328p

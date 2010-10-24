@@ -6,8 +6,8 @@ import select
 import serial
 import time
 
-PORT='/dev/ttyUSB0'	# Linux
-#PORT='/dev/tty.usbserial-A700ekGi'	# OS X (or similar)
+#PORT='/dev/ttyUSB0'	# Linux
+PORT='/dev/tty.usbserial-A700ekGi'	# OS X (or similar)
 #PORT = 'COM3:' # Windows
 
 # Device function codes
@@ -89,6 +89,12 @@ def print_header(data):
 	command   = ord(data[3])
 	print "Command %x sender %x recipient %x length %x" % (command, recipient, sender, words)
 
+def get_command(data):
+	if data:
+		return ord(data[3])
+	else:
+		return None
+
 BUTTONS = ["C", "B", "A", "START", "UP", "DOWN", "LEFT", "RIGHT",
 			"Z", "Y", "X", "D", "UP2", "DOWN2", "LEFT2", "RIGHT2"]
 def print_controller_info(data):
@@ -167,7 +173,6 @@ class MapleProxy(object):
 		#print info_bytes, len(info_bytes)
 		print_header(info_bytes[:4])
 		info_bytes = info_bytes[4:] # Strip header
-		#print debug_hex(info)
 		func, func_data_0, func_data_1, func_data_2, product_name,\
 				product_license =\
 				struct.unpack("<IIII32s60s", info_bytes[:108])
@@ -181,8 +186,16 @@ class MapleProxy(object):
 		#print "Direction? :", ord(connector_dir)
 		print "Name       :", debug_txt(swapwords(product_name))
 		print "License    :", debug_txt(swapwords(product_license))
+		# These are in tenths of a milliwatt, according to the patent:
 		print "Power      :", standby_power
 		print "Power max  :", max_power
+	
+	def getCond(self, address, function):
+		data = struct.pack("<I", function)
+		info_bytes = self.transact(CMD_GET_COND, address, data)
+		print "getCond:"
+		print_header(info_bytes[:4])
+		print debug_hex(info_bytes)
 	
 	def writeLCD(self, address, lcddata):
 		assert len(lcddata) == 192
@@ -192,6 +205,53 @@ class MapleProxy(object):
 			print "No response to writeLCD"
 		else:
 			print_header(info_bytes[:4])
+	
+	def writeFlash(self, address, block, phase, data):
+		data = swapwords(data)
+		assert len(data) == 128
+		addr = (phase << 16) | block
+		data = struct.pack("<II", FN_MEMORY_CARD, addr) + data
+		info_bytes = self.transact(CMD_WRITE, address, data)
+		if info_bytes is None:
+			print "No response to writeFlash"
+		else:
+			assert get_command(info_bytes) == CMD_ACK_RESP
+	
+	def readFlash(self, address, block, phase):
+		addr = (0 << 24) | (phase << 16) | block
+		data = struct.pack("<II", FN_MEMORY_CARD, addr)
+		info_bytes = self.transact(CMD_READ, address, data)
+		assert get_command(info_bytes) == CMD_XFER_RESP
+		data = info_bytes[12:-1]
+		data = swapwords(data)
+		return data
+	
+	def resetDevice(self, address):
+		info_bytes = self.transact(CMD_RESET, address, '')
+		print_header(info_bytes[:4])
+		print debug_hex(info_bytes)
+	
+	def getMemInfo(self, address):
+		partition = 0x0
+		data = struct.pack("<II", FN_MEMORY_CARD, partition << 24)
+		info_bytes = self.transact(CMD_GET_MEMINFO, address, data)
+		print_header(info_bytes[:4])
+		
+		info_bytes = info_bytes[4:-1]
+		assert len(info_bytes) == 4 + (12 * 2)
+		info_bytes = swapwords(info_bytes)
+
+		func_code, maxblk, minblk, infpos, fatpos, fatsz, dirpos, dirsz, icon, datasz,  \
+			res1, res2, res3 = struct.unpack("<IHHHHHHHHHHHH", info_bytes)
+		print "  Max block :", maxblk
+		print "  Min block :", minblk
+		print "  Inf pos   :", infpos
+		print "  FAT pos   :", fatpos
+		print "  FAT size  :", fatsz
+		print "  Dir pos   :", dirpos
+		print "  Dir size  :", dirsz
+		print "  Icon      :", icon
+		print "  Data size :", datasz
 	
 	def readController(self, address):
 		data = struct.pack("<I", FN_CONTROLLER)
@@ -217,9 +277,9 @@ class MapleProxy(object):
 		# Write the frame, wait for response.
 		self.handle.write(chr(len(packet)))
 		self.handle.write(packet)
-		num_bytes = self.handle.read(1)
+		num_bytes = self.handle.read(2)
 		if num_bytes:
-			num_bytes = ord(num_bytes)
+			num_bytes = struct.unpack(">H", num_bytes)[0]
 			return self.handle.read(num_bytes)
 		else:
 			return None
@@ -244,5 +304,6 @@ def test():
 		print_controller_info(bus.readController(ADDRESS_CONTROLLER))
 		time.sleep(1)
 
-test()
+if __name__ == '__main__':
+	test()
 

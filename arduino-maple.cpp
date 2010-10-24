@@ -5,10 +5,11 @@ void setup(void);
 void loop(void);
 
 struct maplepacket {
-	unsigned char data_len; /* Including header and trailing checksum */
+	unsigned char data_len; /* Bytes: header, data, and checksum */
+	unsigned short data_len_rx; /* For Rx -- didn't realise we could get up to 512 bytes */
 
 	unsigned char header[4];
-	unsigned char data[256]; /* Our maximum packet size */
+	unsigned char data[600]; /* Our maximum packet size */
 } packet;
 
 void setup()
@@ -73,7 +74,8 @@ maple_transact()
 
 	maple_tx_raw(&(packet.header[0]), packet.data_len);
 	rx_buf_end = maple_rx_raw(&(packet.header[0]));
-	packet.data_len  = (unsigned char)(rx_buf_end - (&(packet.header[0])));
+
+	packet.data_len_rx = (rx_buf_end - (&(packet.header[0])));
 
 	return true;
 
@@ -113,8 +115,11 @@ read_packet(void)
 void
 send_packet(void)
 {
-	Serial.write(packet.data_len);
-	Serial.write(&(packet.header[0]), packet.data_len);
+	Serial.write((packet.data_len_rx & 0xff00) >> 8);
+	Serial.write(packet.data_len_rx & 0xff);
+	if(packet.data_len_rx) {
+		Serial.write(&(packet.header[0]), packet.data_len_rx);
+	}
 }
 
 void main() __attribute__ ((noreturn));
@@ -123,12 +128,13 @@ void main(void) {
     setup();
 
 	// maple_transact(); for (;;) ;
+	debug(0);
 
     for (;;) {
-		debug(0);
+		//debug(0);
 		if(read_packet()) {
 			maple_transact();
-			debug(1);
+			//debug(1);
 			send_packet();
 		}
 	}
