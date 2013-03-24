@@ -1,8 +1,62 @@
+#include <inttypes.h>
+#include <avr/io.h>
+#include <util/delay.h>
+#include <stdio.h>
+#include <stdbool.h>
 #include "libmaple.h"
 
-#include "WProgram.h"
-void setup(void);
-void loop(void);
+// Serial port setup
+#define BAUD 57600
+#define USE_2X 1
+#include <util/setbaud.h>
+
+FILE uart;
+
+static void uart_putchar(uint8_t c) {
+    if (c == '\n') {
+		loop_until_bit_is_set(UCSR0A, UDRE0); /* Wait until data register empty. */
+		UDR0 = '\r';
+    }
+    loop_until_bit_is_set(UCSR0A, UDRE0); /* Wait until data register empty. */
+    UDR0 = c;
+}
+
+static int stdio_uart_putchar(char c, FILE *handle)
+{
+	(void) handle;
+
+	uart_putchar(c);
+	return 0;
+}
+
+static uint8_t uart_getchar(void) {
+    loop_until_bit_is_set(UCSR0A, RXC0); /* Wait until data exists. */
+    return UDR0;
+}
+
+static int stdio_uart_getchar(FILE *handle)
+{
+	(void) handle;
+	return (int)uart_getchar();
+}
+
+static void uart_init(void) {
+    UBRR0H = UBRRH_VALUE;
+    UBRR0L = UBRRL_VALUE;
+
+#if USE_2X
+    UCSR0A |= _BV(U2X0);
+#else
+    UCSR0A &= ~(_BV(U2X0));
+#endif
+
+    UCSR0C = _BV(UCSZ01) | _BV(UCSZ00); /* 8-bit data */ 
+    UCSR0B = _BV(RXEN0) | _BV(TXEN0);   /* Enable RX and TX */
+
+	fdev_setup_stream(&uart, stdio_uart_putchar, stdio_uart_getchar, _FDEV_SETUP_RW);
+	stdout = &uart;
+	stdin = &uart;
+}
 
 struct maplepacket {
 	unsigned char data_len; /* Bytes: header, data, and checksum */
@@ -14,16 +68,13 @@ struct maplepacket {
 
 void setup()
 {
-	Serial.begin(57600);
+	// Initialise serial port
+	uart_init();
 
-	pinMode(7, OUTPUT); // debug pin
-	pinMode(13, OUTPUT); // More different debug pin
+	// Maple bus data pins as output -- NB needs corresponding changes in libMaple.S
+	DDRB = 0xff;
 
-	// Maple bus data pins
-	pinMode(21, INPUT);
-	digitalWrite(21, HIGH);
-	pinMode(20, INPUT);
-	digitalWrite(20, HIGH);
+	//puts("Hi there \n");
 }
 
 bool maple_transact();
@@ -45,7 +96,7 @@ bool
 maple_transact()
 {
 	unsigned char *rx_buf_end;
-	unsigned char *rx_buf_ptr;
+	//unsigned char *rx_buf_ptr;
 
 	// debug
 	/*
@@ -95,15 +146,12 @@ bool
 read_packet(void)
 {
 	/* First byte: #bytes in packet (including header and checksum)*/
-	while(!(Serial.available()))
-		;
-	packet.data_len = Serial.read();
+	packet.data_len = uart_getchar();
 	if(packet.data_len > 0) {
 		unsigned char *data = &(packet.header[0]);
-		for(int i = 0; i < packet.data_len; i++) {
-			while(!(Serial.available()))
-				;
-			*data = Serial.read();
+		int i;
+		for(i = 0; i < packet.data_len; i++) {
+			*data = uart_getchar();
 			data ++;
 		}
 		return true;
@@ -112,31 +160,47 @@ read_packet(void)
 	}
 }
 
+bool
+packet_dest_is_maple(void)
+{
+	return packet.data_len > 0;
+}
+
 void
 send_packet(void)
 {
-	Serial.write((packet.data_len_rx & 0xff00) >> 8);
-	Serial.write(packet.data_len_rx & 0xff);
+	uart_putchar((packet.data_len_rx & 0xff00) >> 8);
+	uart_putchar(packet.data_len_rx & 0xff);
 	if(packet.data_len_rx) {
-		Serial.write(&(packet.header[0]), packet.data_len_rx);
+		int i;
+		uint8_t *data = &(packet.header[0]);
+		for (i = 0; i < packet.data_len_rx; i++) {
+			uart_putchar(data[i]);
+		}
 	}
 }
 
 void main() __attribute__ ((noreturn));
 void main(void) {
-    init();
     setup();
 
 	// maple_transact(); for (;;) ;
-	debug(0);
+	debug(1);
 
     for (;;) {
 		//debug(0);
-		if(read_packet()) {
+		read_packet();
+		debug(0);
+
+		if(packet_dest_is_maple()) {
 			maple_transact();
 			//debug(1);
 			send_packet();
+		} else {
+			// Debug
+			uart_putchar(1);
 		}
+		debug(1);
 	}
 }
 

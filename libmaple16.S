@@ -1,3 +1,5 @@
+; Functions for Maple bus support on devices with 16-bit program counters (328)
+
 #include <avr/io.h>
 
 ; reg usage faq: http://www.nongnu.org/avr-libc/user-manual/FAQ.html#faq_reg_usage
@@ -349,25 +351,22 @@ maple_timer_test:
 	; Set up the timer
 	timer_init
 	timer_on
-1:
-	nop
-	RJMP 1b							; Infinite loop to test watchdog
 
-maple_timer_test_watchdog:
-	; Timer got us! And it'll get us again.
-	debug_pin_flip
-	timer_on
 1:
 	nop
 	rjmp 1b
+
+maple_timer_test_watchdog:
+	; Timer got us!
+	timer_off
 
 	ret;
 
 ; Turn the led on if r24 (first int parameter) is 1, off if r24 is 0.
 debug:
-	IN r18, _SFR_IO_ADDR(PORTMAPLE)
+	IN r18, _SFR_IO_ADDR(PORTB)
 	bst r24, 0						; first parameter: on or off?
-	bld r18, 5						; bit 5 maps to Arduino pin 13 (the led)
-	out _SFR_IO_ADDR(PORTMAPLE), r18	; on port B
+	bld r18, DEBUG_LED_BIT			; bit 5 on duemilanove, bit 7 on the mega
+	out _SFR_IO_ADDR(PORTB), r18	; on port B
 	ret
 

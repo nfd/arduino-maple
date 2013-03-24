@@ -7,8 +7,8 @@ import serial
 import time
 
 #PORT='/dev/ttyUSB0'	# Linux
-PORT='/dev/tty.usbserial-A700ekGi'	# OS X (or similar)
 #PORT = 'COM3:' # Windows
+PORT='/dev/tty.usbserial-A700ekGi'	# OS X (or similar)
 #PORT='/dev/tty.usbmodemfa131'
 
 # Device function codes
@@ -154,7 +154,21 @@ def load_image(filename):
 class MapleProxy(object):
 	def __init__(self):
 		log("connecting to %s" % (PORT))
-		self.handle = serial.Serial(PORT, 57600, timeout = 3)
+		self.handle = serial.Serial(PORT, 57600, timeout = 1)
+
+		total_sleep = 0
+		while total_sleep < 5:
+			print "are you there?"
+			self.handle.write('\x00') # are-you-there
+			result = self.handle.read(1)
+			if result == '\x01':
+				break
+			time.sleep(0.5)
+			total_sleep += 0.5
+		else:
+			raise Exception()
+
+		print "maple proxy detected"
 	
 	def __del__(self):
 		if hasattr(self, 'handle'):
@@ -163,10 +177,10 @@ class MapleProxy(object):
 	def deviceInfo(self, address):
 		# cmd 1 = request device information
 		info_bytes = self.transact(CMD_INFO, address, '')
-		if info_bytes is None:
+		if not info_bytes:
 			print "No device found at address:"
 			print hex(address)
-			return
+			return False
 
 		#print info_bytes, len(info_bytes)
 		print_header(info_bytes[:4])
@@ -188,6 +202,7 @@ class MapleProxy(object):
 		# These are in tenths of a milliwatt, according to the patent:
 		print "Power      :", standby_power
 		print "Power max  :", max_power
+		return True
 	
 	def getCond(self, address, function):
 		data = struct.pack("<I", function)
@@ -295,8 +310,9 @@ def test():
 	# Nothing will work before you do a deviceInfo on the controller.
 	# I guess this forces the controller to enumerate its devices.
 	bus.deviceInfo(ADDRESS_CONTROLLER)
-	bus.deviceInfo(ADDRESS_PERIPH1)
-	bus.writeLCD(ADDRESS_PERIPH1, image)
+	found_vmu = bus.deviceInfo(ADDRESS_PERIPH1)
+	if found_vmu:
+		bus.writeLCD(ADDRESS_PERIPH1, image)
 
 	print "Play with the controller. Hit ctrl-c when done."
 	while 1:

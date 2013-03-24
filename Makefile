@@ -8,6 +8,8 @@ MCU = m328p
 AVRDUDE_PROGRAMMER = stk500v1
 UPLOAD_SPEED = -b 57600
 PORT = /dev/tty.usbserial-A700ekGi
+DEBUG_LED_BIT = 5
+CHIP_SPECIFIC_ASM=libmaple16.S
 
 # Settings for atmega2560. NB upload speed is autodetected.
 #MMCU = atmega2560
@@ -15,26 +17,25 @@ PORT = /dev/tty.usbserial-A700ekGi
 #MCU = m2560
 #UPLOAD_SPEED=
 #PORT = /dev/tty.usbmodemfa131
+#DEBUG_LED_BIT = 7
+#CHIP_SPECIFIC_ASM=libmaple22.S
  
 # Other settings that hopefully won't need changing much follow.
-SOURCE_DIRS = . arduino
-INCLUDE_DIRS = arduino
+SOURCE_DIRS = .
 # This probably can't be changed without modifying libmaple.S.
 F_CPU = 16000000UL
-SRC_ROOT = .
 BUILD_DIR = build
  
 CFLAGS = -Wall -g2 -gstabs -Os -fpack-struct -fshort-enums -ffunction-sections \
  -fdata-sections -ffreestanding -funsigned-char -funsigned-bitfields \
- -mmcu=$(MMCU) -DF_CPU=$(F_CPU) $(INCLUDE_DIRS:%=-I$(SRC_ROOT)/%)
+ -mmcu=$(MMCU) -DF_CPU=$(F_CPU) -DDEBUG_LED_BIT=$(DEBUG_LED_BIT)
  
 CXXFLAGS = -Wall -g2 -gstabs -Os -fpack-struct -fshort-enums -ffunction-sections \
  -fdata-sections -ffreestanding -funsigned-char -funsigned-bitfields \
- -fno-exceptions -mmcu=$(MMCU) -DF_CPU=$(F_CPU) $(INCLUDE_DIRS:%=-I$(SRC_ROOT)/%)
+ -fno-exceptions -mmcu=$(MMCU) -DF_CPU=$(F_CPU) -DDEBUG_LED_BIT=$(DEBUG_LED_BIT)
  
 LDFLAGS = -Os -Wl,-gc-sections -mmcu=$(MMCU) #-Wl,--relax
  
-TARGET = $(notdir $(realpath $(SRC_ROOT)))
 CC = avr-gcc
 CXX = avr-g++
 OBJCOPY = avr-objcopy
@@ -42,23 +43,23 @@ OBJDUMP = avr-objdump
 AR  = avr-ar
 SIZE = avr-size
 
-SRC = $(wildcard $(SOURCE_DIRS:%=$(SRC_ROOT)/%/*.c))
+SRC = $(wildcard *.c)
  
-CXXSRC = $(wildcard $(SOURCE_DIRS:%=$(SRC_ROOT)/%/*.cpp))
+CXXSRC = $(wildcard *.cpp)
 
-ASMSRC = $(wildcard $(SOURCE_DIRS:%=$(SRC_ROOT)/%/*.S))
+ASMSRC = libmaplecommon.S $(CHIP_SPECIFIC_ASM)
  
-OBJ = $(SRC:$(SRC_ROOT)/%.c=$(BUILD_DIR)/%.o) $(CXXSRC:$(SRC_ROOT)/%.cpp=$(BUILD_DIR)/%.o) $(ASMSRC:$(SRC_ROOT)/%.S=$(BUILD_DIR)/%.o)
+OBJ = $(SRC:%.c=$(BUILD_DIR)/%.o) $(CXXSRC:%.cpp=$(BUILD_DIR)/%.o) $(ASMSRC:%.S=$(BUILD_DIR)/%.o)
  
 DEPS = $(OBJ:%.o=%.d)
  
-$(BUILD_DIR)/%.o: $(SRC_ROOT)/%.c
+$(BUILD_DIR)/%.o: ./%.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
-$(BUILD_DIR)/%.o: $(SRC_ROOT)/%.S
+$(BUILD_DIR)/%.o: ./%.S
 	$(CC) $(CFLAGS) -c $< -o $@
  
-$(BUILD_DIR)/%.o: $(SRC_ROOT)/%.cpp
+$(BUILD_DIR)/%.o: ./%.cpp
 	$(CXX) $(CXXFLAGS) -c $< -o $@
  
 all: app.hex printsize
@@ -69,11 +70,11 @@ all: app.hex printsize
 app.elf: $(OBJ)
 	$(CXX) $(LDFLAGS) $(OBJ) -o $@
  
-$(BUILD_DIR)/%.d: $(SRC_ROOT)/%.c
+$(BUILD_DIR)/%.d: ./%.c
 	mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -MM -MF $@ $<
  
-$(BUILD_DIR)/%.d: $(SRC_ROOT)/%.cpp
+$(BUILD_DIR)/%.d: ./%.cpp
 	mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -MM -MF $@ $<
  
@@ -84,7 +85,8 @@ app.hex: app.elf
 	$(OBJCOPY) -R .eeprom -O ihex $<  $@
  
 clean:
-	$(RM) $(DEPS) $(OBJ)
+	$(RM) $(BUILD_DIR)/*
+	rm app.*
  
 printsize:
 	avr-size --format=avr --mcu=$(MMCU) app.elf
