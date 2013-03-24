@@ -8,8 +8,8 @@ import time
 
 #PORT='/dev/ttyUSB0'	# Linux
 #PORT = 'COM3:' # Windows
-PORT='/dev/tty.usbserial-A700ekGi'	# OS X (or similar)
-#PORT='/dev/tty.usbmodemfa131'
+#PORT='/dev/tty.usbserial-A700ekGi'	# OS X (or similar)
+PORT='/dev/tty.usbmodemfa131'
 
 # Device function codes
 FN_CONTROLLER  = 1
@@ -309,7 +309,11 @@ def test():
 
 	# Nothing will work before you do a deviceInfo on the controller.
 	# I guess this forces the controller to enumerate its devices.
-	bus.deviceInfo(ADDRESS_CONTROLLER)
+	found_controller = bus.deviceInfo(ADDRESS_CONTROLLER)
+	if not found_controller:
+		print "Couldn't find controller."
+		return
+
 	found_vmu = bus.deviceInfo(ADDRESS_PERIPH1)
 	if found_vmu:
 		bus.writeLCD(ADDRESS_PERIPH1, image)

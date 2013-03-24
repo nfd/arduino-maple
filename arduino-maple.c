@@ -187,6 +187,16 @@ void main(void) {
 	// maple_transact(); for (;;) ;
 	debug(1);
 
+#if 0
+	while(1) {
+		puts("before timer test\n");
+		_delay_ms(500);
+		maple_timer_test();
+		puts("after timer test\n");
+		_delay_ms(500);
+	}
+#endif
+
     for (;;) {
 		//debug(0);
 		read_packet();

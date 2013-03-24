@@ -62,10 +62,16 @@
 	nop
 .endm
 
-; Delay half a uS. CALL takes 4 cycles, RET takes 4 cycles,
-; 8 cycles is half a microsecond at 16MHz, voila.
-delayhalf:
-	ret
+.macro delayhalf
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+.endm
 
 maple_tx_start:
 	maple_high bitmaple1
@@ -115,16 +121,16 @@ maple_tx_end:
 	delayquarter
 	; Pin 1 goes low for 2 cycles
 	maple_low bitmaple1
-	RCALL delayhalf
+	delayhalf
 	; Pin 1 goes high for 2 cycles
 	maple_high bitmaple1
-	RCALL delayhalf
+	delayhalf
 	; Pin 1 goes low for 2 cycles
 	maple_low bitmaple1
-	RCALL delayhalf
+	delayhalf
 	; Pin 1 goes high for 2 cycles.
 	maple_high bitmaple1
-	RCALL delayhalf
+	delayhalf
 	; End of sequence: pin 5 goes high
 	maple_high bitmaple5
 	ret
@@ -240,37 +246,22 @@ maple_tx_raw:
 	STS TCNT2, r1					; Count register -> 0
 .endm
 
-; Watchdog timer interrupt routine
-; When this fires, it returns to r25:r24, effectively doing
-; a longjmp().
-TIMER2_OVF_vect:
-	IN intsave, _SFR_IO_ADDR(SREG)	; Save registers;
-	
-	POP intwork						; Remove the old return address
-	POP intwork						; Both words
-	PUSH r24						; Replace it with the new one
-	PUSH r25						; Both words
-	STS TIMSK2, r1					; Disable the timer
-
-	OUT _SFR_IO_ADDR(SREG), intsave	; Restore registers
-	reti
-
 ; Reading
 .macro _rx_read clockbit
 ; Version 1:
 ; Worst-case scenario here: the port is set halfway through the IN -- total 
 ; cost is most of the IN, the BST, 2 cycles for the BRTS, plus the next IN,
 ; for a total of 5 cycles, which is sometimes out of tolerance.
-;1:	IN rport, _SFR_IO_ADDR(PINMAPLE)	; 1
-;	BST rport, \clockbit			; 1
-;	BRTS 1b							; 1 (if fall through)
+1:	IN rport, _SFR_IO_ADDR(PINMAPLE)	; 1
+	BST rport, \clockbit			; 1
+	BRTS 1b							; 1 (if fall through)
 
 ; Version 2:
 ; This works a little better because by the time we detect the falling edge
 ; we already have the value.
-1:	IN rport, _SFR_IO_ADDR(PINMAPLE)
-	SBIC _SFR_IO_ADDR(PINMAPLE), \clockbit
-	RJMP 1b
+;1:	IN rport, _SFR_IO_ADDR(PINMAPLE)
+;	SBIC _SFR_IO_ADDR(PINMAPLE), \clockbit
+;	RJMP 1b
 .endm
 
 .macro _rx_store reg srcbit destbit
@@ -285,8 +276,9 @@ maple_rx_raw:
 	MOVW r26, r24					; X register <- the buffer
 
 	; Set up our bailout routine: r25:24 point to an address to "reti" to.
-	ldi r25, hi8(pm(_maple_rx_raw_watchdog))
-	ldi r24, lo8(pm(_maple_rx_raw_watchdog))
+	ldi r25, hh8(pm(_maple_rx_raw_watchdog))
+	ldi r24, hi8(pm(_maple_rx_raw_watchdog))
+	ldi r23, lo8(pm(_maple_rx_raw_watchdog))
 
 	LDS r18, TIMSK0					; disable Arduino interrupts
 	PUSH r18						; to re-enable later
@@ -343,10 +335,29 @@ _maple_rx_raw_watchdog:				; Watchdog bailed us out. We're done!
 
 	ret
 
+; Watchdog timer interrupt routine
+; When this fires, it returns to r25:r24, effectively doing
+; a longjmp().
+TIMER2_OVF_vect:
+	IN intsave, _SFR_IO_ADDR(SREG)	; Save registers;
+	
+	POP intwork						; Remove the old return address
+	POP intwork						; all three words
+	POP intwork						; 
+	PUSH r23                        ; Store the new return address
+	PUSH r24						; all three words
+	PUSH r25						; 
+	STS TIMSK2, r1					; Disable the timer
+
+	OUT _SFR_IO_ADDR(SREG), intsave	; Restore registers
+	reti
+
 maple_timer_test:
 	; Set up our bailout routine: r25:24 point to an address to "reti" to.
-	ldi r25, hi8(pm(maple_timer_test_watchdog))
-	ldi r24, lo8(pm(maple_timer_test_watchdog))
+	; broken for 22 bit pc
+	ldi r25, hh8(pm(maple_timer_test_watchdog))
+	ldi r24, hi8(pm(maple_timer_test_watchdog))
+	ldi r23, lo8(pm(maple_timer_test_watchdog))
 
 	; Set up the timer
 	timer_init
