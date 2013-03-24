@@ -9,6 +9,7 @@ import time
 #PORT='/dev/ttyUSB0'	# Linux
 PORT='/dev/tty.usbserial-A700ekGi'	# OS X (or similar)
 #PORT = 'COM3:' # Windows
+#PORT='/dev/tty.usbmodemfa131'
 
 # Device function codes
 FN_CONTROLLER  = 1
@@ -154,8 +155,6 @@ class MapleProxy(object):
 	def __init__(self):
 		log("connecting to %s" % (PORT))
 		self.handle = serial.Serial(PORT, 57600, timeout = 3)
-		time.sleep(2) # allow it to reset
-		log("connected")
 	
 	def __del__(self):
 		if hasattr(self, 'handle'):
@@ -169,7 +168,6 @@ class MapleProxy(object):
 			print hex(address)
 			return
 
-		print debug_hex(info_bytes), len(info_bytes)
 		#print info_bytes, len(info_bytes)
 		print_header(info_bytes[:4])
 		info_bytes = info_bytes[4:] # Strip header
@@ -178,6 +176,7 @@ class MapleProxy(object):
 				struct.unpack("<IIII32s60s", info_bytes[:108])
 		max_power, standby_power = struct.unpack(">HH", info_bytes[108:112])
 		print "Device information:"
+		print "raw:", debug_hex(info_bytes), len(info_bytes)
 		print "Functions  :", ', '.join(decode_func_codes(func))
 		print "Periph 1   :", hex(func_data_0)
 		print "Periph 2   :", hex(func_data_1)

@@ -16,19 +16,23 @@
 #define rport2 r21
 #define rport r30
 
-; Maple1 is on bit 0 of PORTB -- mask of 1:
+; Maple1 is on bit 0 of PORTMAPLE -- mask of 1:
 #define bitmaple1 0
 #define maskmaple1 1
 ; maple5 is on bit 1 -- mask of 10:
 #define bitmaple5 1
 #define maskmaple5 2
 
+#define PORTMAPLE PORTB
+#define PINMAPLE PINB
+#define DDRMAPLE DDRB
+
 .macro maple_high pin
-	SBI _SFR_IO_ADDR(PORTB), \pin
+	SBI _SFR_IO_ADDR(PORTMAPLE), \pin
 .endm
 
 .macro maple_low pin
-	CBI _SFR_IO_ADDR(PORTB), \pin
+	CBI _SFR_IO_ADDR(PORTMAPLE), \pin
 .endm
 
 .macro debug_pin_high
@@ -184,8 +188,8 @@ _maple_tx_next_byte:
 ; Returns pointer to final character stored in r25:r24
 maple_tx_raw:
 	; Set pins to output for transmission
-	SBI _SFR_IO_ADDR(DDRB), bitmaple1
-	SBI _SFR_IO_ADDR(DDRB), bitmaple5
+	SBI _SFR_IO_ADDR(DDRMAPLE), bitmaple1
+	SBI _SFR_IO_ADDR(DDRMAPLE), bitmaple5
 
 
 	RCALL maple_tx_start
@@ -193,10 +197,10 @@ maple_tx_raw:
 	RCALL maple_tx_end
 
 	; Tx over: set pins to input and enable pull-up resistors.
-	SBI _SFR_IO_ADDR(PORTB), bitmaple1
-	SBI _SFR_IO_ADDR(PORTB), bitmaple5
-	CBI _SFR_IO_ADDR(DDRB), bitmaple1
-	CBI _SFR_IO_ADDR(DDRB), bitmaple5
+	SBI _SFR_IO_ADDR(PORTMAPLE), bitmaple1
+	SBI _SFR_IO_ADDR(PORTMAPLE), bitmaple5
+	CBI _SFR_IO_ADDR(DDRMAPLE), bitmaple1
+	CBI _SFR_IO_ADDR(DDRMAPLE), bitmaple5
 
 	ret
 
@@ -255,22 +259,22 @@ TIMER2_OVF_vect:
 ; Worst-case scenario here: the port is set halfway through the IN -- total 
 ; cost is most of the IN, the BST, 2 cycles for the BRTS, plus the next IN,
 ; for a total of 5 cycles, which is sometimes out of tolerance.
-;1:	IN rport, _SFR_IO_ADDR(PINB)	; 1
+;1:	IN rport, _SFR_IO_ADDR(PINMAPLE)	; 1
 ;	BST rport, \clockbit			; 1
 ;	BRTS 1b							; 1 (if fall through)
 
 ; Version 2:
 ; This works a little better because by the time we detect the falling edge
 ; we already have the value.
-1:	IN rport, _SFR_IO_ADDR(PINB)
-	SBIC _SFR_IO_ADDR(PINB), \clockbit
+1:	IN rport, _SFR_IO_ADDR(PINMAPLE)
+	SBIC _SFR_IO_ADDR(PINMAPLE), \clockbit
 	RJMP 1b
 .endm
 
 .macro _rx_store reg srcbit destbit
 	BST \reg, \srcbit		; 1
 	BLD r18, \destbit		; 1
-;1:	IN \reg, _SFR_IO_ADDR(PINB)
+;1:	IN \reg, _SFR_IO_ADDR(PINMAPLE)
 ;	BST \reg, \srcbit
 ;	BRTC 1b
 .endm
@@ -294,15 +298,15 @@ maple_rx_raw:
 	; Wait for a start sequence
 	timer_on						; rx will start soon
 
-1:	IN rport2, _SFR_IO_ADDR(PINB)
+1:	IN rport2, _SFR_IO_ADDR(PINMAPLE)
 	BST rport2, bitmaple1			; maple1
 	BRTC 1b							; must be high initially
 
-2:	IN rport2, _SFR_IO_ADDR(PINB)
+2:	IN rport2, _SFR_IO_ADDR(PINMAPLE)
 	BST rport2, bitmaple1
 	BRTS 2b							; must be low to continue
 
-3:	IN rport2, _SFR_IO_ADDR(PINB)
+3:	IN rport2, _SFR_IO_ADDR(PINMAPLE)
 	BST rport2, bitmaple1			; maple1
 	BRTC 3b							; must be high now
 
@@ -361,9 +365,9 @@ maple_timer_test_watchdog:
 
 ; Turn the led on if r24 (first int parameter) is 1, off if r24 is 0.
 debug:
-	IN r18, _SFR_IO_ADDR(PORTB)
+	IN r18, _SFR_IO_ADDR(PORTMAPLE)
 	bst r24, 0						; first parameter: on or off?
 	bld r18, 5						; bit 5 maps to Arduino pin 13 (the led)
-	out _SFR_IO_ADDR(PORTB), r18	; on port B
+	out _SFR_IO_ADDR(PORTMAPLE), r18	; on port B
 	ret
 

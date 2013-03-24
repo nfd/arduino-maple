@@ -20,10 +20,10 @@ void setup()
 	pinMode(13, OUTPUT); // More different debug pin
 
 	// Maple bus data pins
-	pinMode(8, INPUT);
-	digitalWrite(8, HIGH);
-	pinMode(9, INPUT);
-	digitalWrite(9, HIGH);
+	pinMode(21, INPUT);
+	digitalWrite(21, HIGH);
+	pinMode(20, INPUT);
+	digitalWrite(20, HIGH);
 }
 
 bool maple_transact();
