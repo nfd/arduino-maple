@@ -3,4 +3,5 @@ app.elf
 app.hex
 *.o
 Session.vim
-
+*.pyc
+*.bak
