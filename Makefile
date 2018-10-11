@@ -3,22 +3,22 @@
 # Hacked up by nfd
 
 # Settings for atmega328
-#MMCU = atmega328
-#MCU = m328p
-#AVRDUDE_PROGRAMMER = stk500v1
-#UPLOAD_SPEED = -b 57600
-#PORT = /dev/tty.usbserial-A700ekGi
-#DEBUG_LED_BIT = 5
-#CHIP_SPECIFIC_ASM=libmaple16.S
+MMCU = atmega328
+MCU = m328p
+AVRDUDE_PROGRAMMER = stk500v1
+UPLOAD_SPEED = -b 57600
+PORT = /dev/tty.usbserial-A700ekGi
+DEBUG_LED_BIT = 5
+CHIP_SPECIFIC_ASM=libmaple16.S
 
 # Settings for atmega2560. NB upload speed is autodetected.
-MMCU = atmega2560
-AVRDUDE_PROGRAMMER = stk600
-MCU = m2560
-UPLOAD_SPEED=
-PORT = /dev/tty.usbmodemfa131
-DEBUG_LED_BIT = 7
-CHIP_SPECIFIC_ASM=libmaple22.S
+#MMCU = atmega2560
+#AVRDUDE_PROGRAMMER = stk600
+#MCU = m2560
+#UPLOAD_SPEED=
+#PORT = /dev/tty.usbmodemfa131
+#DEBUG_LED_BIT = 7
+#CHIP_SPECIFIC_ASM=libmaple22.S
  
 # Other settings that hopefully won't need changing much follow.
 SOURCE_DIRS = .
@@ -106,6 +106,6 @@ $(UPLOAD_SPEED)
 INSTALL_DIR = \app\arduino-0021
 AVRDUDE = avrdude
 upload: app.hex
-	python pulsedtr.py $(PORT)
+	python3 pulsedtr.py $(PORT)
 	$(AVRDUDE) $(AVRDUDE_FLAGS) $(AVRDUDE_WRITE_FLASH)
 

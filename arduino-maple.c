@@ -63,7 +63,7 @@ struct maplepacket {
 	unsigned short data_len_rx; /* For Rx -- didn't realise we could get up to 512 bytes */
 
 	unsigned char header[4];
-	unsigned char data[600]; /* Our maximum packet size */
+	unsigned char data[1532]; /* Our maximum packet size */
 } packet;
 
 void setup()
@@ -127,6 +127,9 @@ maple_transact()
 	rx_buf_end = maple_rx_raw(&(packet.header[0]));
 
 	packet.data_len_rx = (rx_buf_end - (&(packet.header[0])));
+
+	// TODO debittify here rather than in Python: it's simpler in C and
+	// significantly reduces transfer time.
 
 	return true;
 

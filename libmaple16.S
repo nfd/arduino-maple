@@ -9,14 +9,12 @@
 .global maple_tx_raw
 .global maple_rx_raw
 .global maple_timer_test
-.global TIMER2_OVF_vect
 
 #define intsave r31
 #define intwork r20
 #define tmp1 r18
 #define tmp2 r19
-#define rport2 r21
-#define rport r30
+#define rport r21
 
 ; Maple1 is on bit 0 of PORTMAPLE -- mask of 1:
 #define bitmaple1 0
@@ -24,6 +22,9 @@
 ; maple5 is on bit 1 -- mask of 10:
 #define bitmaple5 1
 #define maskmaple5 2
+#define maskmaple 3
+
+#define bufsize_div_four 255
 
 #define PORTMAPLE PORTB
 #define PINMAPLE PINB
@@ -57,6 +58,12 @@
 
 .macro delayquarter
 	nop
+	nop
+	nop
+	nop
+.endm
+
+.macro threenops
 	nop
 	nop
 	nop
@@ -126,7 +133,8 @@ maple_tx_end:
 	maple_high bitmaple1
 	RCALL delayhalf
 	; End of sequence: pin 5 goes high
-	maple_high bitmaple5
+	; moved to rx
+	;maple_high bitmaple5
 	ret
 
 
@@ -198,169 +206,131 @@ maple_tx_raw:
 	RCALL maple_tx_data
 	RCALL maple_tx_end
 
-	; Tx over: set pins to input and enable pull-up resistors.
-	SBI _SFR_IO_ADDR(PORTMAPLE), bitmaple1
-	SBI _SFR_IO_ADDR(PORTMAPLE), bitmaple5
-	CBI _SFR_IO_ADDR(DDRMAPLE), bitmaple1
-	CBI _SFR_IO_ADDR(DDRMAPLE), bitmaple5
+	; Tx over: set pins to input and enable pull-up resistors. (Done in rx)
+	;SBI _SFR_IO_ADDR(PORTMAPLE), bitmaple1
+	;CBI _SFR_IO_ADDR(DDRMAPLE), bitmaple1
+	; SBI _SFR_IO_ADDR(PORTMAPLE), bitmaple5
+	; CBI _SFR_IO_ADDR(DDRMAPLE), bitmaple5
 
 	ret
 
-; Watchdog timer
-.macro timer_init
-	CLI
-
-	STS TIMSK2, r1					; Normal mode (no PWM)
-
-	STS TCCR2A, r1					; Normal mode (no PWM)
-
-	LDI r18, 1 << CS22 | 1 << CS21 | 1 << CS20
-	STS TCCR2B, r18					; Timer increments every 1024 cycles
-									; and overflows every 1024 * 256 cycles,
-									; or about 61 times a second at 16MHz
-
-	STS TCNT2, r1					; Timer count
-
-	LDI r18, 1						; TIFR2[0] -> 1 to clear
-	STS TIFR2, r18					; overflow irq flag
-
-	SEI
-.endm
-
-.macro timer_on
-	LDI r18, 1 << TOIE2
-	STS TIMSK2, r18
-.endm
-
-.macro timer_off
-	STS TIMSK2, r1
-.endm
-
-.macro timer_reset
-	STS TCNT2, r1					; Count register -> 0
-.endm
-
-; Watchdog timer interrupt routine
-; When this fires, it returns to r25:r24, effectively doing
-; a longjmp().
-TIMER2_OVF_vect:
-	IN intsave, _SFR_IO_ADDR(SREG)	; Save registers;
-	
-	POP intwork						; Remove the old return address
-	POP intwork						; Both words
-	PUSH r24						; Replace it with the new one
-	PUSH r25						; Both words
-	STS TIMSK2, r1					; Disable the timer
-
-	OUT _SFR_IO_ADDR(SREG), intsave	; Restore registers
-	reti
-
-; Reading
-.macro _rx_read clockbit
-; Version 1:
-; Worst-case scenario here: the port is set halfway through the IN -- total 
-; cost is most of the IN, the BST, 2 cycles for the BRTS, plus the next IN,
-; for a total of 5 cycles, which is sometimes out of tolerance.
-;1:	IN rport, _SFR_IO_ADDR(PINMAPLE)	; 1
-;	BST rport, \clockbit			; 1
-;	BRTS 1b							; 1 (if fall through)
-
-; Version 2:
-; This works a little better because by the time we detect the falling edge
-; we already have the value.
-1:	IN rport, _SFR_IO_ADDR(PINMAPLE)
-	SBIC _SFR_IO_ADDR(PINMAPLE), \clockbit
-	RJMP 1b
-.endm
-
-.macro _rx_store reg srcbit destbit
-	BST \reg, \srcbit		; 1
-	BLD r18, \destbit		; 1
-;1:	IN \reg, _SFR_IO_ADDR(PINMAPLE)
-;	BST \reg, \srcbit
-;	BRTC 1b
-.endm
-
 maple_rx_raw:
 	MOVW r26, r24					; X register <- the buffer
+	LDI r30, bufsize_div_four		; low byte of Z <- space remaining div 4
 
-	; Set up our bailout routine: r25:24 point to an address to "reti" to.
-	ldi r25, hi8(pm(_maple_rx_raw_watchdog))
-	ldi r24, lo8(pm(_maple_rx_raw_watchdog))
-
-	LDS r18, TIMSK0					; disable Arduino interrupts
-	PUSH r18						; to re-enable later
-	STS TIMSK0, r1
-
-	timer_init						; Set up our watchdog timer
+	LDI r18, 0						; clear r18
 
 	; Tell the device it can start sending data. (this is from the tx lead-out)
-	; maple_high bitmaple5 
+	;maple_high bitmaple5  ; done implicitly by enabling pull-ups below
+	SBI _SFR_IO_ADDR(PORTMAPLE), bitmaple1
+	CBI _SFR_IO_ADDR(DDRMAPLE), bitmaple1
+	SBI _SFR_IO_ADDR(PORTMAPLE), bitmaple5
+	CBI _SFR_IO_ADDR(DDRMAPLE), bitmaple5
 
 	; Wait for a start sequence
-	timer_on						; rx will start soon
+1:  SBIS _SFR_IO_ADDR(PINMAPLE), bitmaple1
+	RJMP 1b
 
-1:	IN rport2, _SFR_IO_ADDR(PINMAPLE)
-	BST rport2, bitmaple1			; maple1
-	BRTC 1b							; must be high initially
+2:  SBIC _SFR_IO_ADDR(PINMAPLE), bitmaple1
+	RJMP 2b
 
-2:	IN rport2, _SFR_IO_ADDR(PINMAPLE)
-	BST rport2, bitmaple1
-	BRTS 2b							; must be low to continue
+3:  SBIS _SFR_IO_ADDR(PINMAPLE), bitmaple1
+	RJMP 3b
 
-3:	IN rport2, _SFR_IO_ADDR(PINMAPLE)
-	BST rport2, bitmaple1			; maple1
-	BRTC 3b							; must be high now
+	; first byte will be 		00 11 -- 22
+	; subsequent bytes will be	11 22 00 33
+4:
+	IN rport, _SFR_IO_ADDR(PINMAPLE)	; (1) 					
+	SWAP r18							; (1) r18 = -- 00 -- --		first: r18 = -- -- -- --
+	OR r18, rport						; (1) r18 = -- 00 -- 11		first: r18 = -- -- -- 00
+	LSL r18								; (1)
+	IN rport, _SFR_IO_ADDR(PINMAPLE)	; (1) 
+	LSL r18								; (1) r18 = 00 -- 11 --		first: r18 = -- -- 00 --
 
-	_rx_read bitmaple1
-_rx_loop:
-	_rx_store rport bitmaple5 7	
-	_rx_read bitmaple5
-	_rx_store rport bitmaple1 6
-	_rx_read bitmaple1
-	_rx_store rport bitmaple5 5
-	_rx_read bitmaple5
-	_rx_store rport bitmaple1 4
-	_rx_read bitmaple1
-	timer_reset						; pat the watchdog
-	_rx_store rport bitmaple5 3
-	_rx_read bitmaple5
-	_rx_store rport bitmaple1 2
-	_rx_read bitmaple1
-	_rx_store rport bitmaple5 1
-	_rx_read bitmaple5
-	_rx_store rport bitmaple1 0	; 2
-	ST X+, r18					
-	_rx_read bitmaple1
-	RJMP _rx_loop			
+	OR r18, rport						; (1) r18 = 00 -- 11 22		first: r18 = -- -- 00 11
+	SWAP r18							; (1) r18 = 11 22 00 --		first: r18 = 00 11 -- --
 
-_maple_rx_raw_watchdog:				; Watchdog bailed us out. We're done!
+	IN rport, _SFR_IO_ADDR(PINMAPLE)	; (1)
+	OR r18, rport						; (1) r18 = 11 22 00 33		first: r18 = 00 11 -- 22
+	ST X+, r18							; (2)
+
+	IN r18, _SFR_IO_ADDR(PINMAPLE)		; (1) r18 = -- -- -- 00
+
+	; unroll 1
+	NOP
+	NOP
+	NOP
+
+	IN rport, _SFR_IO_ADDR(PINMAPLE)	; (1) 					
+	SWAP r18							; (1) r18 = -- 00 -- --		first: r18 = -- -- -- --
+	OR r18, rport						; (1) r18 = -- 00 -- 11		first: r18 = -- -- -- 00
+	LSL r18								; (1)
+	IN rport, _SFR_IO_ADDR(PINMAPLE)	; (1) 
+	LSL r18								; (1) r18 = 00 -- 11 --		first: r18 = -- -- 00 --
+
+	OR r18, rport						; (1) r18 = 00 -- 11 22		first: r18 = -- -- 00 11
+	SWAP r18							; (1) r18 = 11 22 00 --		first: r18 = 00 11 -- --
+
+	IN rport, _SFR_IO_ADDR(PINMAPLE)	; (1)
+	OR r18, rport						; (1) r18 = 11 22 00 33		first: r18 = 00 11 -- 22
+	ST X+, r18							; (2)
+
+	IN r18, _SFR_IO_ADDR(PINMAPLE)		; (1) r18 = -- -- -- 00
+
+	; unroll 2
+	NOP
+	NOP
+	NOP
+
+	IN rport, _SFR_IO_ADDR(PINMAPLE)	; (1) 					
+	SWAP r18							; (1) r18 = -- 00 -- --		first: r18 = -- -- -- --
+	OR r18, rport						; (1) r18 = -- 00 -- 11		first: r18 = -- -- -- 00
+	LSL r18								; (1)
+	IN rport, _SFR_IO_ADDR(PINMAPLE)	; (1) 
+	LSL r18								; (1) r18 = 00 -- 11 --		first: r18 = -- -- 00 --
+
+	OR r18, rport						; (1) r18 = 00 -- 11 22		first: r18 = -- -- 00 11
+	SWAP r18							; (1) r18 = 11 22 00 --		first: r18 = 00 11 -- --
+
+	IN rport, _SFR_IO_ADDR(PINMAPLE)	; (1)
+	OR r18, rport						; (1) r18 = 11 22 00 33		first: r18 = 00 11 -- 22
+	ST X+, r18							; (2)
+
+	IN r18, _SFR_IO_ADDR(PINMAPLE)		; (1) r18 = -- -- -- 00
+
+	; unroll 3
+	NOP
+	NOP
+	NOP
+
+	IN rport, _SFR_IO_ADDR(PINMAPLE)	; (1) 					
+	SWAP r18							; (1) r18 = -- 00 -- --		first: r18 = -- -- -- --
+	OR r18, rport						; (1) r18 = -- 00 -- 11		first: r18 = -- -- -- 00
+	LSL r18								; (1)
+	IN rport, _SFR_IO_ADDR(PINMAPLE)	; (1) 
+	LSL r18								; (1) r18 = 00 -- 11 --		first: r18 = -- -- 00 --
+
+	OR r18, rport						; (1) r18 = 00 -- 11 22		first: r18 = -- -- 00 11
+	SWAP r18							; (1) r18 = 11 22 00 --		first: r18 = 00 11 -- --
+
+	IN rport, _SFR_IO_ADDR(PINMAPLE)	; (1)
+	OR r18, rport						; (1) r18 = 11 22 00 33		first: r18 = 00 11 -- 22
+	ST X+, r18							; (2)
+
+	IN r18, _SFR_IO_ADDR(PINMAPLE)		; (1) r18 = -- -- -- 00
+
+	DEC r30								; (1)
+	BRNE 4b								; (2)
+	; out of space
+
+_maple_rx_end:
 	; debug_pin_high
-	POP r18							;
-	STS TIMSK0, r18					; re-enable Arduino interrupts
+	;POP r18							;
+	;STS TIMSK0, r18					; re-enable Arduino interrupts
 
 	MOVW r24, r26					; end of buffer <- X register
 
 	ret
-
-maple_timer_test:
-	; Set up our bailout routine: r25:24 point to an address to "reti" to.
-	ldi r25, hi8(pm(maple_timer_test_watchdog))
-	ldi r24, lo8(pm(maple_timer_test_watchdog))
-
-	; Set up the timer
-	timer_init
-	timer_on
-
-1:
-	nop
-	rjmp 1b
-
-maple_timer_test_watchdog:
-	; Timer got us!
-	timer_off
-
-	ret;
 
 ; Turn the led on if r24 (first int parameter) is 1, off if r24 is 0.
 debug:
