@@ -62,8 +62,7 @@ struct maplepacket {
 	unsigned char data_len; /* Bytes: header, data, and checksum */
 	unsigned short data_len_rx; /* For Rx -- didn't realise we could get up to 512 bytes */
 
-	unsigned char header[4];
-	unsigned char data[1532]; /* Our maximum packet size */
+	unsigned char data[1536]; /* Our maximum packet size */
 } packet;
 
 void setup()
@@ -83,7 +82,7 @@ void setup()
 
 unsigned char compute_checksum(unsigned char data_bytes)
 {
-	unsigned char *ptr = &(packet.header[0]);
+	unsigned char *ptr = packet.data;
 	int count;
 	unsigned char checksum = 0;
 
@@ -92,6 +91,12 @@ unsigned char compute_checksum(unsigned char data_bytes)
 		ptr++;
 	}
 	return checksum;
+}
+
+/* Turn logic-analyser-style reads into a bit sequence. */
+void debittify()
+{
+	// TODO -- done in Python currently.
 }
 
 bool
@@ -125,10 +130,10 @@ maple_transact(short skip_amt)
 	packet.data_len  = 4 + 192 + 4 + 1;
 	*/
 
-	maple_tx_raw(&(packet.header[0]), packet.data_len);
-	rx_buf_end = maple_rx_raw(&(packet.header[0]), skip_amt);
+	maple_tx_raw(packet.data, packet.data_len);
+	rx_buf_end = maple_rx_raw(packet.data, skip_amt);
 
-	packet.data_len_rx = (rx_buf_end - (&(packet.header[0])));
+	packet.data_len_rx = (rx_buf_end - packet.data);
 
 	// TODO debittify here rather than in Python: it's simpler in C and
 	// significantly reduces transfer time.
@@ -153,7 +158,7 @@ read_packet(void)
 	/* First byte: #bytes in packet (including header and checksum)*/
 	packet.data_len = uart_getchar();
 	if(packet.data_len > 0) {
-		unsigned char *data = &(packet.header[0]);
+		unsigned char *data = packet.data;
 		int i;
 		for(i = 0; i < packet.data_len; i++) {
 			*data = uart_getchar();
@@ -178,7 +183,7 @@ send_packet(void)
 	uart_putchar(packet.data_len_rx & 0xff);
 	if(packet.data_len_rx) {
 		int i;
-		uint8_t *data = &(packet.header[0]);
+		uint8_t *data = packet.data;
 		for (i = 0; i < packet.data_len_rx; i++) {
 			uart_putchar(data[i]);
 		}
