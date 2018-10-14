@@ -10,10 +10,9 @@
 .global maple_rx_raw
 .global maple_timer_test
 
-#define intsave r31
-#define intwork r20
 #define tmp1 r18
 #define tmp2 r19
+#define tmp3 r20
 #define rport r21
 
 ; Maple1 is on bit 0 of PORTMAPLE -- mask of 1:
@@ -26,16 +25,23 @@
 
 #define bufsize_div_four 255
 
-#define PORTMAPLE PORTB
-#define PINMAPLE PINB
-#define DDRMAPLE DDRB
+#define PORTMAPLE1 PORTB
+#define PINMAPLE1 PINB
+#define DDRMAPLE1 DDRB
+
+#define PORTMAPLE2 PORTC
+#define PINMAPLE2 PINC
+#define DDRMAPLE2 DDRC
+
+#define IOM1 _SFR_IO_ADDR(PINMAPLE1)
+#define IOM2 _SFR_IO_ADDR(PINMAPLE2)
 
 .macro maple_high pin
-	SBI _SFR_IO_ADDR(PORTMAPLE), \pin
+	SBI _SFR_IO_ADDR(PORTMAPLE1), \pin
 .endm
 
 .macro maple_low pin
-	CBI _SFR_IO_ADDR(PORTMAPLE), \pin
+	CBI _SFR_IO_ADDR(PORTMAPLE1), \pin
 .endm
 
 .macro debug_pin_high
@@ -197,23 +203,36 @@ _maple_tx_next_byte:
 
 ; Returns pointer to final character stored in r25:r24
 maple_tx_raw:
-	; Set pins to output for transmission
-	SBI _SFR_IO_ADDR(DDRMAPLE), bitmaple1
-	SBI _SFR_IO_ADDR(DDRMAPLE), bitmaple5
-
+	; Set primary pins to output for transmission
+	SBI _SFR_IO_ADDR(DDRMAPLE1), bitmaple1
+	SBI _SFR_IO_ADDR(DDRMAPLE1), bitmaple5
 
 	RCALL maple_tx_start
 	RCALL maple_tx_data
 	RCALL maple_tx_end
 
 	; Tx over: set pins to input and enable pull-up resistors. (Done in rx)
-	;SBI _SFR_IO_ADDR(PORTMAPLE), bitmaple1
-	;CBI _SFR_IO_ADDR(DDRMAPLE), bitmaple1
-	; SBI _SFR_IO_ADDR(PORTMAPLE), bitmaple5
-	; CBI _SFR_IO_ADDR(DDRMAPLE), bitmaple5
+	;SBI _SFR_IO_ADDR(PORTMAPLE1), bitmaple1
+	;CBI _SFR_IO_ADDR(DDRMAPLE1), bitmaple1
+	; SBI _SFR_IO_ADDR(PORTMAPLE1), bitmaple5
+	; CBI _SFR_IO_ADDR(DDRMAPLE1), bitmaple5
 
 	ret
 
+.macro read_four_samples
+	IN r18, IOM2		; ----51-- ------51 ----51--			r18 is third read (after loop). order: r19, r20, r18
+	OR r18, r19			; ----5151								r18 = none, none, third, first
+	SWAP r18			; 5151----								r18 = third, first, none, none
+	IN r19, IOM1		; 5151---- ------51
+	OR r18, r20			; 515151--								r18 = third, first, second, none
+	OR r18, r19			; 51515151								r18 = third, first, second, fourth
+	IN r19, IOM1		; 51515151 ------51						r19 is new first
+	ST X+, r18			; -------- ------51						 
+	IN r20, IOM2		; -------- ------51 ----51--			r20 is new second
+.endm
+
+; r24:25 -- pointer to buffer
+; r22:23 -- skip_amt
 maple_rx_raw:
 	MOVW r26, r24					; X register <- the buffer
 	LDI r30, bufsize_div_four		; low byte of Z <- space remaining div 4
@@ -221,107 +240,55 @@ maple_rx_raw:
 	LDI r18, 0						; clear r18
 
 	; Tell the device it can start sending data. (this is from the tx lead-out)
-	;maple_high bitmaple5  ; done implicitly by enabling pull-ups below
-	SBI _SFR_IO_ADDR(PORTMAPLE), bitmaple1
-	CBI _SFR_IO_ADDR(DDRMAPLE), bitmaple1
-	SBI _SFR_IO_ADDR(PORTMAPLE), bitmaple5
-	CBI _SFR_IO_ADDR(DDRMAPLE), bitmaple5
+	maple_high bitmaple5  ; done implicitly by enabling pull-ups below
+	SBI _SFR_IO_ADDR(PORTMAPLE1), bitmaple1
+	CBI _SFR_IO_ADDR(DDRMAPLE1), bitmaple1
+	SBI _SFR_IO_ADDR(PORTMAPLE1), bitmaple5
+	CBI _SFR_IO_ADDR(DDRMAPLE1), bitmaple5
 
-	; Wait for a start sequence
-1:  SBIS _SFR_IO_ADDR(PINMAPLE), bitmaple1
-	RJMP 1b
-
-2:  SBIC _SFR_IO_ADDR(PINMAPLE), bitmaple1
+	; start sequence: wait for bitmaple1 to go low
+2:  SBIC _SFR_IO_ADDR(PINMAPLE1), bitmaple1
 	RJMP 2b
 
-3:  SBIS _SFR_IO_ADDR(PINMAPLE), bitmaple1
+	; wait for bitmapl1 to go high again
+3:  SBIS _SFR_IO_ADDR(PINMAPLE1), bitmaple1
 	RJMP 3b
 
-	; first byte will be 		00 11 -- 22
-	; subsequent bytes will be	11 22 00 33
+	; This seems to be required here to avoid being one bit early. This
+	; one-cycle NOP plus the previous (not taken, thus one-cycle) RJMP forms one
+	; sample period.
+	NOP
+
+	; lead-in: read_four_samples expects r18 and r20 to be populated in this way.
+	IN r19, IOM1
+	NOP
+	NOP
+	IN r20, IOM2
+	NOP
+	NOP
 4:
-	IN rport, _SFR_IO_ADDR(PINMAPLE)	; (1) 					
-	SWAP r18							; (1) r18 = -- 00 -- --		first: r18 = -- -- -- --
-	OR r18, rport						; (1) r18 = -- 00 -- 11		first: r18 = -- -- -- 00
-	LSL r18								; (1)
-	IN rport, _SFR_IO_ADDR(PINMAPLE)	; (1) 
-	LSL r18								; (1) r18 = 00 -- 11 --		first: r18 = -- -- 00 --
+	; main read loop, unrolled 4x to read 4 bytes.
 
-	OR r18, rport						; (1) r18 = 00 -- 11 22		first: r18 = -- -- 00 11
-	SWAP r18							; (1) r18 = 11 22 00 --		first: r18 = 00 11 -- --
+	; read first byte
+	read_four_samples
 
-	IN rport, _SFR_IO_ADDR(PINMAPLE)	; (1)
-	OR r18, rport						; (1) r18 = 11 22 00 33		first: r18 = 00 11 -- 22
-	ST X+, r18							; (2)
-
-	IN r18, _SFR_IO_ADDR(PINMAPLE)		; (1) r18 = -- -- -- 00
-
-	; unroll 1
+	; read second byte:
 	NOP
 	NOP
-	NOP
+	read_four_samples
 
-	IN rport, _SFR_IO_ADDR(PINMAPLE)	; (1) 					
-	SWAP r18							; (1) r18 = -- 00 -- --		first: r18 = -- -- -- --
-	OR r18, rport						; (1) r18 = -- 00 -- 11		first: r18 = -- -- -- 00
-	LSL r18								; (1)
-	IN rport, _SFR_IO_ADDR(PINMAPLE)	; (1) 
-	LSL r18								; (1) r18 = 00 -- 11 --		first: r18 = -- -- 00 --
-
-	OR r18, rport						; (1) r18 = 00 -- 11 22		first: r18 = -- -- 00 11
-	SWAP r18							; (1) r18 = 11 22 00 --		first: r18 = 00 11 -- --
-
-	IN rport, _SFR_IO_ADDR(PINMAPLE)	; (1)
-	OR r18, rport						; (1) r18 = 11 22 00 33		first: r18 = 00 11 -- 22
-	ST X+, r18							; (2)
-
-	IN r18, _SFR_IO_ADDR(PINMAPLE)		; (1) r18 = -- -- -- 00
-
-	; unroll 2
+	; read third byte:
 	NOP
 	NOP
-	NOP
+	read_four_samples
 
-	IN rport, _SFR_IO_ADDR(PINMAPLE)	; (1) 					
-	SWAP r18							; (1) r18 = -- 00 -- --		first: r18 = -- -- -- --
-	OR r18, rport						; (1) r18 = -- 00 -- 11		first: r18 = -- -- -- 00
-	LSL r18								; (1)
-	IN rport, _SFR_IO_ADDR(PINMAPLE)	; (1) 
-	LSL r18								; (1) r18 = 00 -- 11 --		first: r18 = -- -- 00 --
+	; read final byte
+	DEC r30					; have we run out of space?
+	BREQ _maple_rx_end		; yes, stop writing
+	read_four_samples
 
-	OR r18, rport						; (1) r18 = 00 -- 11 22		first: r18 = -- -- 00 11
-	SWAP r18							; (1) r18 = 11 22 00 --		first: r18 = 00 11 -- --
-
-	IN rport, _SFR_IO_ADDR(PINMAPLE)	; (1)
-	OR r18, rport						; (1) r18 = 11 22 00 33		first: r18 = 00 11 -- 22
-	ST X+, r18							; (2)
-
-	IN r18, _SFR_IO_ADDR(PINMAPLE)		; (1) r18 = -- -- -- 00
-
-	; unroll 3
-	NOP
-	NOP
-	NOP
-
-	IN rport, _SFR_IO_ADDR(PINMAPLE)	; (1) 					
-	SWAP r18							; (1) r18 = -- 00 -- --		first: r18 = -- -- -- --
-	OR r18, rport						; (1) r18 = -- 00 -- 11		first: r18 = -- -- -- 00
-	LSL r18								; (1)
-	IN rport, _SFR_IO_ADDR(PINMAPLE)	; (1) 
-	LSL r18								; (1) r18 = 00 -- 11 --		first: r18 = -- -- 00 --
-
-	OR r18, rport						; (1) r18 = 00 -- 11 22		first: r18 = -- -- 00 11
-	SWAP r18							; (1) r18 = 11 22 00 --		first: r18 = 00 11 -- --
-
-	IN rport, _SFR_IO_ADDR(PINMAPLE)	; (1)
-	OR r18, rport						; (1) r18 = 11 22 00 33		first: r18 = 00 11 -- 22
-	ST X+, r18							; (2)
-
-	IN r18, _SFR_IO_ADDR(PINMAPLE)		; (1) r18 = -- -- -- 00
-
-	DEC r30								; (1)
-	BRNE 4b								; (2)
-	; out of space
+	; lead-out: 2-cycle jump to read the next 4 bytes.
+	RJMP 4b
 
 _maple_rx_end:
 	; debug_pin_high

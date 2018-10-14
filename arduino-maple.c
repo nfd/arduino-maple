@@ -74,10 +74,12 @@ void setup()
 	// Maple bus data pins as output -- NB needs corresponding changes in libMaple.S
 	DDRB = 0xff;
 
+	// Secondary pins are always tristate (floating and input).
+	DDRC = 0x0;
+	PORTC = 0x0;
+
 	//puts("Hi there \n");
 }
-
-bool maple_transact();
 
 unsigned char compute_checksum(unsigned char data_bytes)
 {
@@ -93,7 +95,7 @@ unsigned char compute_checksum(unsigned char data_bytes)
 }
 
 bool
-maple_transact()
+maple_transact(short skip_amt)
 {
 	unsigned char *rx_buf_end;
 	//unsigned char *rx_buf_ptr;
@@ -124,7 +126,7 @@ maple_transact()
 	*/
 
 	maple_tx_raw(&(packet.header[0]), packet.data_len);
-	rx_buf_end = maple_rx_raw(&(packet.header[0]));
+	rx_buf_end = maple_rx_raw(&(packet.header[0]), skip_amt);
 
 	packet.data_len_rx = (rx_buf_end - (&(packet.header[0])));
 
@@ -206,7 +208,7 @@ void main(void) {
 		debug(0);
 
 		if(packet_dest_is_maple()) {
-			maple_transact();
+			maple_transact(0);
 			//debug(1);
 			send_packet();
 		} else {

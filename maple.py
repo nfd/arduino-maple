@@ -160,7 +160,6 @@ def debittify(bitstring):
     The maple proxy sends a bitstring consisting of the state of the two pins sampled at 2MSPS. Decode these 
     back into bytes.
     """
-    #print('prebit', debug_hex(bitstring))
     # the two bits are (maple5, maple1) and are stored in each byte in this way:
     # 51515151
     def iter_bits():
@@ -191,19 +190,74 @@ def debittify(bitstring):
         bitcount += 1
 
     state = 0
+    idx = 0
+    old_pin1 = 1
+    old_pin5 = 0
+    started = True
+    debug_bits_list = []
     for pin5, pin1 in iter_bits():
-        if state == 0 and not pin1:
-            add_bit(pin5)
-            state = 1
-        elif state == 1 and pin5:
-            state = 2
-        elif state == 2 and not pin5:
-            add_bit(pin1)
-            state = 3
-        elif state == 3 and pin1:
-            state = 0
+        debug_bits = '%c%c' % ('1' if pin5 else '0', '1' if pin1 else '0')
 
-    output.append(accum)
+        if pin1 and pin5 and started:
+            # Skip the initial both-lines-high condition
+            continue
+
+        started = False
+
+        debug_this_time = [debug_bits]
+
+        if old_pin1 and not pin1:
+            debug_this_time.append(1)
+            add_bit(pin5)
+            if bitcount == 1 and output:
+                debug_this_time.append(output[-1])
+        if old_pin5 and not pin5:
+            debug_this_time.append(5)
+            add_bit(pin1)
+            if bitcount == 1 and output:
+                debug_this_time.append(output[-1])
+
+        old_pin5 = pin5
+        old_pin1 = pin1
+
+        debug_bits_list.append(debug_this_time)
+
+#        if state == 0 and not pin1:
+#            add_bit(pin5)
+#            state = 1
+#        elif state == 1 and pin5:
+#            state = 2
+#        elif state == 2 and not pin5:
+#            add_bit(pin1)
+#            state = 3
+#        elif state == 3 and pin1:
+#            state = 0
+
+    # debug:
+    for offset in range(0, len(debug_bits_list), 60):
+        end = min(offset + 60, len(debug_bits_list))
+
+        for i in range(offset, end):
+            sys.stdout.write('%s ' % (debug_bits_list[i][0]))
+
+        sys.stdout.write('\n')
+
+        for i in range(offset, end):
+            if len(debug_bits_list[i]) == 2:
+                sys.stdout.write(' %d ' % (debug_bits_list[i][1]))
+            else:
+                sys.stdout.write('   ')
+
+        sys.stdout.write('\n')
+
+        for i in range(offset, end):
+            if len(debug_bits_list[i]) == 3:
+                character = debug_bits_list[i][2]
+                sys.stdout.write(' %c ' % (character,) if 32 <= character <= 128 else '%02x ' % (character,))
+            else:
+                sys.stdout.write('   ')
+
+        sys.stdout.write('\n')
 
     #print('debit', '{0:08b}{1:08b}{2:08b}{3:08b}'.format(output[0], output[1], output[2], output[3]))
     return bytes(output)
