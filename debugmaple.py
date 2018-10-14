@@ -6,6 +6,7 @@ import select
 import serial
 import time
 import argparse
+import collections
 
 PORT='/dev/tty.usbserial-A700ekGi'    # OS X (or similar)
 FN_CONTROLLER  = 1
@@ -53,6 +54,18 @@ ADDRESS_CONTROLLER = 1 << 5
 ADDRESS_PERIPH1 = 1
 # Dreamcast, magic value, port A
 ADDRESS_DC         = 0
+
+# At least this many trailing samples must have both pins high in order for the receive to be
+# considered complete.
+IDLE_SAMPLES_INDICATING_COMPLETION = 8
+
+SKIP_LOOP_LENGTH = 2  # size is given in samples
+
+# Safety factor for skip loop to give us a chance to align the thing later
+RX_SKIP_SAFETY_FACTOR = 4  # samples
+
+# Number of samples stored per byte.
+RAW_SAMPLES_PER_BYTE = 4
 
 log = print
 
@@ -125,6 +138,7 @@ def debittify(bitstring):
     started = True
     debug_bits_list = []
     skip = 0
+    num_samples_all_high = 0  # in a row
     for pin5, pin1 in iter_bits():
         if skip:
             skip -= 1
@@ -132,9 +146,15 @@ def debittify(bitstring):
 
         debug_bits = '%c%c' % ('1' if pin5 else '0', '1' if pin1 else '0')
 
-        if pin1 and pin5 and started:
-            # Skip the initial both-lines-high condition
-            continue
+        if pin1 and pin5:
+            if started:
+                # Skip the initial both-lines-high condition
+                continue
+            else:
+                num_samples_all_high += 1
+        else:
+            num_samples_all_high = 0
+
 
         started = False
 
@@ -157,33 +177,48 @@ def debittify(bitstring):
         debug_bits_list.append(debug_this_time)
 
     # debug:
-    for offset in range(0, len(debug_bits_list), 60):
-        end = min(offset + 60, len(debug_bits_list))
+    debug = False
+    if debug:
+        for offset in range(0, len(debug_bits_list), 60):
+            end = min(offset + 60, len(debug_bits_list))
 
-        for i in range(offset, end):
-            sys.stdout.write('%s ' % (debug_bits_list[i][0]))
+            for i in range(offset, end):
+                sys.stdout.write('%s ' % (debug_bits_list[i][0]))
 
-        sys.stdout.write('\n')
+            sys.stdout.write('\n')
 
-        for i in range(offset, end):
-            if len(debug_bits_list[i]) >= 2:
-                sys.stdout.write('%s ' % ('^c' if debug_bits_list[i][1] == 1 else 'c^'))
-            else:
-                sys.stdout.write('   ')
+            for i in range(offset, end):
+                if len(debug_bits_list[i]) >= 2:
+                    sys.stdout.write('%s ' % ('^c' if debug_bits_list[i][1] == 1 else 'c^'))
+                else:
+                    sys.stdout.write('   ')
 
-        sys.stdout.write('\n')
+            sys.stdout.write('\n')
 
-        for i in range(offset, end):
-            if len(debug_bits_list[i]) == 3:
-                character = debug_bits_list[i][2]
-                sys.stdout.write(' %c ' % (character,) if 32 <= character < 128 else '%02x ' % (character,))
-            else:
-                sys.stdout.write('   ')
+            for i in range(offset, end):
+                if len(debug_bits_list[i]) == 3:
+                    character = debug_bits_list[i][2]
+                    sys.stdout.write(' %c ' % (character,) if 32 <= character < 128 else '%02x ' % (character,))
+                else:
+                    sys.stdout.write('   ')
 
-        sys.stdout.write('\n')
+            sys.stdout.write('\n')
 
-    #print('debit', '{0:08b}{1:08b}{2:08b}{3:08b}'.format(output[0], output[1], output[2], output[3]))
-    return bytes(output)
+        #print('debit', '{0:08b}{1:08b}{2:08b}{3:08b}'.format(output[0], output[1], output[2], output[3]))
+        print('bitcount', bitcount)
+
+    # the recv was completed if at least the last IDLE_SAMPLES_INDICATING_COMPLETION samples
+    # are all '11'.
+    recv_completed = num_samples_all_high >= IDLE_SAMPLES_INDICATING_COMPLETION
+    return bytes(output), recv_completed
+
+def align_messages(prev, current):
+    return prev + current
+
+def calculate_recv_skip(samples_so_far):
+    " Calculate the amount to skip forward. "
+    samples_to_skip = max(0, samples_so_far - RX_SKIP_SAFETY_FACTOR)
+    return samples_to_skip // SKIP_LOOP_LENGTH
 
 class MapleProxy(object):
     def __init__(self, port=PORT):
@@ -193,7 +228,7 @@ class MapleProxy(object):
         total_sleep = 0
         while total_sleep < 5:
             print("are you there?")
-            self.handle.write(b'\x00') # are-you-there
+            self.handle.write(b'\x00\x00\x00') # are-you-there
             result = self.handle.read(1)
             if result == b'\x01':
                 break
@@ -210,7 +245,7 @@ class MapleProxy(object):
     
     def deviceInfo(self, address, debug_filename=None):
         # cmd 1 = request device information
-        info_bytes = self.transact(CMD_INFO, address, b'', debug_write_filename=debug_filename)
+        info_bytes = self.transact(CMD_INFO, address, b'', debug_write_filename=debug_filename, allow_repeats=True)
         if not info_bytes:
             print("No device found at address:")
             print(hex(address))
@@ -221,7 +256,7 @@ class MapleProxy(object):
         info_bytes = info_bytes[4:] # Strip header
         print("Device information:")
         print("raw:", debug_hex(swapwords(info_bytes)), len(info_bytes))
-        return True
+        #return True
         func, func_data_0, func_data_1, func_data_2, product_name,\
                 product_license =\
                 struct.unpack("<IIII32s60s", info_bytes[:108])
@@ -239,7 +274,8 @@ class MapleProxy(object):
         print("Power max  :", max_power)
         return True
 
-    def transact(self, command, recipient, data, debug_write_filename):
+    RxResponse = collections.namedtuple('RxResponse', ('result', 'completed', 'num_samples'))
+    def transact(self, command, recipient, data, debug_write_filename, allow_repeats=False):
         # Construct a frame header.
         sender = ADDRESS_DC
         assert len(data) < 256
@@ -249,18 +285,60 @@ class MapleProxy(object):
 
         #print ('out', debug_hex(packet))
         # Write the frame, wait for response.
-        self.handle.write(bytes([len(packet)]))
-        self.handle.write(packet)
-        num_bytes = self.handle.read(2)
-        if num_bytes:
-            num_bytes = struct.unpack(">H", num_bytes)[0]
-            raw_response = self.handle.read(num_bytes)
-            if debug_write_filename:
-                with open(debug_write_filename, 'wb') as h:
-                    h.write(raw_response)
-            return debittify(raw_response)
-        else:
+        completed = False
+        entire_message = b''
+        samples_so_far = 0
+
+        while True:
+            recv_skip = calculate_recv_skip(samples_so_far)
+            rx_response = self._transact_multiple(packet, recv_skip, num_tries=3 if allow_repeats else 1)
+            entire_message = align_messages(entire_message, rx_response.result)
+            if not allow_repeats or rx_response.completed:
+                break
+            samples_so_far += rx_response.num_samples
+
+        return entire_message
+
+    def _transact_multiple(self, packet, recv_skip, num_tries, debug_write_filename=None):
+        results = []
+        completed = []  # whether this packet was cut off due to arduino space constraints
+        num_samples = []  # number of samples in this packet (for skipping later if necessary)
+        for retry in range(num_tries):
+            self.handle.write(bytes([len(packet)]))
+            self.handle.write(struct.pack('<H', recv_skip))  # recv skip
+            self.handle.write(packet)
+            num_bytes = self.handle.read(2)
+            if num_bytes:
+                num_bytes = struct.unpack(">H", num_bytes)[0]
+                raw_response = self.handle.read(num_bytes)
+                if debug_write_filename:
+                    with open(debug_write_filename, 'wb') as h:
+                        h.write(raw_response)
+                debittified_response, transmission_complete = debittify(raw_response)
+                results.append(debittified_response)
+                completed.append(transmission_complete)
+                num_samples.append(len(raw_response) * RAW_SAMPLES_PER_BYTE)
+
+        # Find the two which match.
+        if not results:
             return None
+        elif len(results) == 1:
+            return results[0]
+        else:
+            # Find the best-attested result. If they're all different, just return the first result.
+            best_idx = 0
+            best_count = 0
+            for idx1 in range(len(results)):
+                current_count = 0
+                for idx2 in range(idx1, len(results)):
+                    if results[idx1] == results[idx2]:
+                        current_count += 1
+
+                if current_count > best_count:
+                    best_idx = idx1
+                    best_count = current_count
+
+            return self.RxResponse(result=results[best_idx], completed=completed[best_idx], num_samples=num_samples[best_idx])
 
     def compute_checksum(self, data):
         checksum = 0
@@ -288,13 +366,12 @@ def test():
         # I guess this forces the controller to enumerate its devices.
         debug_filename = '%s-controller' % (args.debug_prefix,) if args.debug_prefix else None
         found_controller = bus.deviceInfo(ADDRESS_CONTROLLER, debug_filename=debug_filename)
-        found_controller = bus.deviceInfo(ADDRESS_CONTROLLER, debug_filename=debug_filename)
         if not found_controller:
             print("Couldn't find controller.")
             #return
 
         debug_filename = '%s-vmu' % (args.debug_prefix,) if args.debug_prefix else None
-        #found_vmu = bus.deviceInfo(ADDRESS_PERIPH1, debug_filename=debug_filename)
+        found_vmu = bus.deviceInfo(ADDRESS_PERIPH1, debug_filename=debug_filename)
     else:
         debug_dump(args.debug_prefix + '-controller')
 

@@ -34,6 +34,10 @@ static uint8_t uart_getchar(void) {
     return UDR0;
 }
 
+static uint16_t uart_getshort(void) {
+	return (uint16_t)(uart_getchar()) | (((uint16_t)uart_getchar()) << 8);
+}
+
 static int stdio_uart_getchar(FILE *handle)
 {
 	(void) handle;
@@ -61,6 +65,7 @@ static void uart_init(void) {
 struct maplepacket {
 	unsigned char data_len; /* Bytes: header, data, and checksum */
 	unsigned short data_len_rx; /* For Rx -- didn't realise we could get up to 512 bytes */
+	unsigned short recv_skip; /* 6-cycle durations to skip when receiving */
 
 	unsigned char data[1536]; /* Our maximum packet size */
 } packet;
@@ -78,6 +83,7 @@ void setup()
 	PORTC = 0x0;
 
 	//puts("Hi there \n");
+	packet.recv_skip = 0;
 }
 
 unsigned char compute_checksum(unsigned char data_bytes)
@@ -100,7 +106,7 @@ void debittify()
 }
 
 bool
-maple_transact(short skip_amt)
+maple_transact()
 {
 	unsigned char *rx_buf_end;
 	//unsigned char *rx_buf_ptr;
@@ -131,7 +137,7 @@ maple_transact(short skip_amt)
 	*/
 
 	maple_tx_raw(packet.data, packet.data_len);
-	rx_buf_end = maple_rx_raw(packet.data, skip_amt);
+	rx_buf_end = maple_rx_raw(packet.data, packet.recv_skip);
 
 	packet.data_len_rx = (rx_buf_end - packet.data);
 
@@ -157,6 +163,7 @@ read_packet(void)
 {
 	/* First byte: #bytes in packet (including header and checksum)*/
 	packet.data_len = uart_getchar();
+	packet.recv_skip = uart_getshort();
 	if(packet.data_len > 0) {
 		unsigned char *data = packet.data;
 		int i;
@@ -213,7 +220,7 @@ void main(void) {
 		debug(0);
 
 		if(packet_dest_is_maple()) {
-			maple_transact(0);
+			maple_transact();
 			//debug(1);
 			send_packet();
 		} else {

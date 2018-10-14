@@ -24,6 +24,7 @@
 #define maskmaple 3
 
 #define bufsize_div_four 255
+#define bufsize_div_six 255
 
 #define PORTMAPLE1 PORTB
 #define PINMAPLE1 PINB
@@ -231,11 +232,15 @@ maple_tx_raw:
 	IN r20, IOM2		; -------- ------51 ----51--			r20 is new second
 .endm
 
-; r24:25 -- pointer to buffer
 ; r22:23 -- skip_amt
+; r24:25 -- pointer to buffer
 maple_rx_raw:
 	MOVW r26, r24					; X register <- the buffer
-	LDI r30, bufsize_div_four		; low byte of Z <- space remaining div 4
+	PUSH r28						; save Y register (avr-gcc frame pointer)
+	PUSH r29
+	MOVW r28, r22					; Y register <- the amount of 2-sample cycles to skip
+	MOVW r30, r24
+	LDI r30, bufsize_div_six		; low byte of Z <- space remaining div 6
 
 	LDI r18, 0						; clear r18
 
@@ -247,27 +252,28 @@ maple_rx_raw:
 	CBI _SFR_IO_ADDR(DDRMAPLE1), bitmaple5
 
 	; start sequence: wait for bitmaple1 to go low
-2:  SBIC _SFR_IO_ADDR(PINMAPLE1), bitmaple1
+1:  SBIC _SFR_IO_ADDR(PINMAPLE1), bitmaple1
+	RJMP 1b
+
+	; wait for bitmaple1 to go high again
+2:  SBIS _SFR_IO_ADDR(PINMAPLE1), bitmaple1
 	RJMP 2b
 
-	; wait for bitmapl1 to go high again
-3:  SBIS _SFR_IO_ADDR(PINMAPLE1), bitmaple1
-	RJMP 3b
+	; TODO is a NOP required here? Hard to tell.
 
-	; This seems to be required here to avoid being one bit early. This
-	; one-cycle NOP plus the previous (not taken, thus one-cycle) RJMP forms one
-	; sample period.
-	NOP
+3:
+	; lead-in: read_four_samples expects r18 and r20 to each contain one sample.
+	; This also incorporates cycle skipping if desired, by passing in the number of cycles to skip,
+	; divided by 6 (which is the number of cycles in the loop). We take one sample every three cycles,
+	; so there's no way to go out of sync with a bizarre skip value.
 
-	; lead-in: read_four_samples expects r18 and r20 to be populated in this way.
 	IN r19, IOM1
-	NOP
-	NOP
+	SBIW r28, 1			; subtract 1 from amount to skip
 	IN r20, IOM2
-	NOP
-	NOP
+	BRPL 3b				; if we're still skipping, skip some more.
+	NOP					; BRPL not taken takes one cycle -- wait one more before starting the read loop.
 4:
-	; main read loop, unrolled 4x to read 4 bytes.
+	; main read loop, unrolled 6x to read 6 bytes.
 
 	; read first byte
 	read_four_samples
@@ -278,6 +284,16 @@ maple_rx_raw:
 	read_four_samples
 
 	; read third byte:
+	NOP
+	NOP
+	read_four_samples
+
+	; read fourth byte:
+	NOP
+	NOP
+	read_four_samples
+
+	; read fifth byte:
 	NOP
 	NOP
 	read_four_samples
@@ -294,6 +310,8 @@ _maple_rx_end:
 	; debug_pin_high
 	;POP r18							;
 	;STS TIMSK0, r18					; re-enable Arduino interrupts
+	POP r29							; restore Y register (avr-gcc frame pointer)
+	POP r28
 
 	MOVW r24, r26					; end of buffer <- X register
 
