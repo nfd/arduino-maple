@@ -61,8 +61,8 @@ IDLE_SAMPLES_INDICATING_COMPLETION = 8
 
 SKIP_LOOP_LENGTH = 2  # size is given in samples
 
-# Safety factor for skip loop to give us a chance to align the thing later
-RX_SKIP_SAFETY_FACTOR = 4  # samples
+# Safety factor for skip loop to give us a chance to align subsequences -- turns out not to be needed
+RX_SKIP_SAFETY_FACTOR = 0  # samples
 
 # Number of samples stored per byte.
 RAW_SAMPLES_PER_BYTE = 4
@@ -94,6 +94,12 @@ def swapwords(s):
         s = s[4:]
     return b''.join(swapped)
 
+def get_command(data):
+    if data:
+        return data[3]
+    else:
+        return None
+
 def decode_func_codes(code):
     names = []
     for candidate in sorted(FN_CODE_MAP.keys()):
@@ -102,10 +108,70 @@ def decode_func_codes(code):
 
     return names
 
+BUTTONS = ["C", "B", "A", "START", "UP", "DOWN", "LEFT", "RIGHT",
+            "Z", "Y", "X", "D", "UP2", "DOWN2", "LEFT2", "RIGHT2"]
+def print_controller_info(data):
+    print_header(data)
+    data = data[4:]  # Header
+    data = data[4:]  # Func
+    data = data[:-1] # CRC
+    data = swapwords(data)
+    buttons = struct.unpack("<H", data[:2])[0]
+    buttons = ~buttons & 0xffff
+    button_names = []
+    for bit, name in enumerate(BUTTONS):
+        if buttons & (1 << bit):
+            button_names.append(name)
+    print("Ltrig", data[3], end=' ')
+    print("Rtrig", data[2], end=' ')
+    print("Joy X", data[4], end=' ')
+    print("Joy Y", data[5], end=' ')
+    print("Joy X2", data[6], end=' ')
+    print("Joy Y2", data[7], end=' ')
+    print(", ".join(button_names))
+    #print debug_hex(data)
+
+def load_image(filename):
+    data = [0] * ((48 * 32) // 8)
+    x = y = 0
+    stride = 48
+    lines = open(filename, 'r').readlines()
+    lines = lines[-1::-1]
+    for line in lines:
+        while line[-1] in '\r\n':
+            line = line[:-1]
+        for x in range(len(line)):
+            if line[x] != ' ':
+                byte = (x + (y * stride)) // 8
+                bit  = (x + (y * stride)) % 8
+                # Magical transformations! 
+                # Brilliant memory layout here
+                if y % 2 == 0:
+                    if x < 16:
+                        byte += (stride // 8)
+                    else:
+                        byte -= 2
+                if y % 2 == 1:
+                    if x < 32:
+                        byte += 2
+                    else:
+                        byte -= (stride // 8)
+
+                data[byte] |= 1 << bit
+        y += 1
+    assert len(data) == 48 * 32 // 8
+    return bytes(data)
+
+# result = decoded data
+# num_samples = number of useful (bit-generating) samples
+# recv_completed = no data cut off due to space constraints
+DecodedRx = collections.namedtuple('DecodedRx', ('result', 'num_samples', 'completed'))
 def debittify(bitstring):
     """
     The maple proxy sends a bitstring consisting of the state of the two pins sampled at 2MSPS. Decode these 
     back into bytes.
+    
+    We also want a sample count back from this, so return a DecodedRx.
     """
     def iter_bits():
         # Order of bits: 33 11 22 44
@@ -121,15 +187,16 @@ def debittify(bitstring):
 
     def add_bit(thebit):
         nonlocal accum, bitcount, output
-        if bitcount == 8:
-            output.append(accum)
-            bitcount = accum = 0
-
         accum <<= 1
         if thebit:
             accum |= 1
         bitcount += 1
-        return bitcount == 8
+
+        if bitcount == 8:
+            output.append(accum)
+            bitcount = accum = 0
+
+        return bitcount == 0
 
     state = 0
     idx = 0
@@ -137,13 +204,9 @@ def debittify(bitstring):
     old_pin5 = 0
     started = True
     debug_bits_list = []
-    skip = 0
     num_samples_all_high = 0  # in a row
+    samples_this_byte = 0  # useful at the end for calculating total number of samples.
     for pin5, pin1 in iter_bits():
-        if skip:
-            skip -= 1
-            continue
-
         debug_bits = '%c%c' % ('1' if pin5 else '0', '1' if pin1 else '0')
 
         if pin1 and pin5:
@@ -157,9 +220,9 @@ def debittify(bitstring):
 
 
         started = False
-
         debug_this_time = [debug_bits]
 
+        added = False
         if old_pin1 and not pin1:
             debug_this_time.append(1)
             added = add_bit(pin5)
@@ -170,6 +233,14 @@ def debittify(bitstring):
             added = add_bit(pin1)
             if added:
                 debug_this_time.append(accum)
+
+        if added:
+            debug_this_time.append(accum)
+
+        if added:
+            samples_this_byte = 0
+        else:
+            samples_this_byte += 1
 
         old_pin5 = pin5
         old_pin1 = pin1
@@ -210,7 +281,13 @@ def debittify(bitstring):
     # the recv was completed if at least the last IDLE_SAMPLES_INDICATING_COMPLETION samples
     # are all '11'.
     recv_completed = num_samples_all_high >= IDLE_SAMPLES_INDICATING_COMPLETION
-    return bytes(output), recv_completed
+
+    if recv_completed:
+        # TODO: why?
+        output = output[:-1]
+
+    num_samples = (len(bitstring) * RAW_SAMPLES_PER_BYTE) - samples_this_byte
+    return DecodedRx(result=bytes(output), num_samples=num_samples, completed=recv_completed)
 
 def align_messages(prev, current):
     return prev + current
@@ -274,8 +351,90 @@ class MapleProxy(object):
         print("Power max  :", max_power)
         return True
 
-    RxResponse = collections.namedtuple('RxResponse', ('result', 'completed', 'num_samples'))
-    def transact(self, command, recipient, data, debug_write_filename, allow_repeats=False):
+    def readFlash(self, address, block, phase):
+        addr = (0 << 24) | (phase << 16) | block
+        data = struct.pack("<II", FN_MEMORY_CARD, addr)
+        for repeat in range(3):
+            info_bytes = self.transact(CMD_READ, address, data, None, allow_repeats=True)
+            data = info_bytes[12:]
+            data = swapwords(data)
+            if len(data) == 512 and get_command(info_bytes) == CMD_XFER_RESP:
+                break
+
+        return data
+
+    def getCond(self, address, function):
+        data = struct.pack("<I", function)
+        info_bytes = self.transact(CMD_GET_COND, address, data)
+        print("getCond:")
+        print_header(info_bytes[:4])
+        print(debug_hex(info_bytes))
+    
+    def writeLCD(self, address, lcddata):
+        assert len(lcddata) == 192
+        data = struct.pack("<II", FN_LCD, 0) + lcddata
+        info_bytes = self.transact(CMD_WRITE, address, data)
+        if info_bytes is None:
+            print("No response to writeLCD")
+        else:
+            print_header(info_bytes[:4])
+    
+    def writeFlash(self, address, block, phase, data):
+        data = swapwords(data)
+        assert len(data) == 128
+        addr = (phase << 16) | block
+        data = struct.pack("<II", FN_MEMORY_CARD, addr) + data
+        info_bytes = self.transact(CMD_WRITE, address, data)
+        print(info_bytes)
+        return
+
+        if info_bytes is None:
+            print("No response to writeFlash")
+        else:
+            assert get_command(info_bytes) == CMD_ACK_RESP, get_command(info_bytes)
+
+    def writeFlashComplete(self, address, block):
+        addr = (4 << 16) | block
+        data = struct.pack('<II', FN_MEMORY_CARD, addr)
+        info_bytes = self.transact(CMD_WRITE_COMPLETE, address, data)
+        print(info_bytes)
+        return
+
+    def resetDevice(self, address):
+        info_bytes = self.transact(CMD_RESET, address, b'')
+        print_header(info_bytes[:4])
+        print(debug_hex(info_bytes))
+    
+    def getMemInfo(self, address):
+        partition = 0x0
+        data = struct.pack("<II", FN_MEMORY_CARD, partition << 24)
+        info_bytes = self.transact(CMD_GET_MEMINFO, address, data, allow_repeats=True)
+        print_header(info_bytes[:4])
+        return
+        
+        info_bytes = info_bytes[4:-1]
+        assert len(info_bytes) == 4 + (12 * 2)
+        info_bytes = swapwords(info_bytes)
+
+        func_code, maxblk, minblk, infpos, fatpos, fatsz, dirpos, dirsz, icon, datasz,  \
+            res1, res2, res3 = struct.unpack("<IHHHHHHHHHHHH", info_bytes)
+        print("  Max block :", maxblk)
+        print("  Min block :", minblk)
+        print("  Inf pos   :", infpos)
+        print("  FAT pos   :", fatpos)
+        print("  FAT size  :", fatsz)
+        print("  Dir pos   :", dirpos)
+        print("  Dir size  :", dirsz)
+        print("  Icon      :", icon)
+        print("  Data size :", datasz)
+
+    def readController(self, address):
+        data = struct.pack("<I", FN_CONTROLLER)
+        info_bytes = self.transact(CMD_GET_COND, address, data)
+        return info_bytes
+        #print debug_hex(info_bytes)
+
+    def transact(self, command, recipient, data, debug_write_filename=None, allow_repeats=False):
         # Construct a frame header.
         sender = ADDRESS_DC
         assert len(data) < 256
@@ -301,8 +460,6 @@ class MapleProxy(object):
 
     def _transact_multiple(self, packet, recv_skip, num_tries, debug_write_filename=None):
         results = []
-        completed = []  # whether this packet was cut off due to arduino space constraints
-        num_samples = []  # number of samples in this packet (for skipping later if necessary)
         for retry in range(num_tries):
             self.handle.write(bytes([len(packet)]))
             self.handle.write(struct.pack('<H', recv_skip))  # recv skip
@@ -314,10 +471,7 @@ class MapleProxy(object):
                 if debug_write_filename:
                     with open(debug_write_filename, 'wb') as h:
                         h.write(raw_response)
-                debittified_response, transmission_complete = debittify(raw_response)
-                results.append(debittified_response)
-                completed.append(transmission_complete)
-                num_samples.append(len(raw_response) * RAW_SAMPLES_PER_BYTE)
+                results.append(debittify(raw_response))
 
         # Find the two which match.
         if not results:
@@ -338,7 +492,7 @@ class MapleProxy(object):
                     best_idx = idx1
                     best_count = current_count
 
-            return self.RxResponse(result=results[best_idx], completed=completed[best_idx], num_samples=num_samples[best_idx])
+            return results[best_idx]
 
     def compute_checksum(self, data):
         checksum = 0
@@ -372,6 +526,10 @@ def test():
 
         debug_filename = '%s-vmu' % (args.debug_prefix,) if args.debug_prefix else None
         found_vmu = bus.deviceInfo(ADDRESS_PERIPH1, debug_filename=debug_filename)
+
+        # read flash block 0
+        flash = bus.readFlash(ADDRESS_PERIPH1, 255, 0)
+        print('flash', flash, len(flash))
     else:
         debug_dump(args.debug_prefix + '-controller')
 

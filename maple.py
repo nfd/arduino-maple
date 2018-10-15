@@ -1,18 +1,14 @@
 #!/usr/bin/env python
-
+# copy of large chunks of maple.py for debug / testing purposes.
 import sys
 import struct
 import select
 import serial
 import time
 import argparse
+import collections
 
-#PORT='/dev/ttyUSB0'    # Linux
-#PORT = 'COM3:' # Windows
-#PORT='/dev/tty.usbserial-A700ekGi'    # OS X (or similar)
-PORT='/dev/tty.usbmodemfa131'
-
-# Device function codes
+PORT='/dev/tty.usbserial-A700ekGi'    # OS X (or similar)
 FN_CONTROLLER  = 1
 FN_MEMORY_CARD = 2
 FN_LCD         = 0x4
@@ -59,8 +55,19 @@ ADDRESS_PERIPH1 = 1
 # Dreamcast, magic value, port A
 ADDRESS_DC         = 0
 
-def log(txt):
-    print(txt)
+# At least this many trailing samples must have both pins high in order for the receive to be
+# considered complete.
+IDLE_SAMPLES_INDICATING_COMPLETION = 8
+
+SKIP_LOOP_LENGTH = 2  # size is given in samples
+
+# Safety factor for skip loop to give us a chance to align subsequences -- turns out not to be needed
+RX_SKIP_SAFETY_FACTOR = 0  # samples
+
+# Number of samples stored per byte.
+RAW_SAMPLES_PER_BYTE = 4
+
+log = print
 
 def debug_hex(packet):
     def ascii(b):
@@ -72,21 +79,6 @@ def debug_hex(packet):
 
 def debug_txt(packet):
     return bytes([c if int(c) >= ord(' ') and int(c) <= ord('z') else ord('.') for c in packet])
-    
-def decode_func_codes(code):
-    names = []
-    for candidate in sorted(FN_CODE_MAP.keys()):
-        if code & candidate:
-            names.append(FN_CODE_MAP[candidate])
-
-    return names
-
-def swapwords(s):
-    swapped = []
-    while s:
-        swapped.append(s[:4][-1::-1])
-        s = s[4:]
-    return b''.join(swapped)
 
 def print_header(data):
     words     = data[0]
@@ -95,11 +87,26 @@ def print_header(data):
     command   = data[3]
     print("Command %x sender %x recipient %x length %x" % (command, recipient, sender, words))
 
+def swapwords(s):
+    swapped = []
+    while s:
+        swapped.append(s[:4][-1::-1])
+        s = s[4:]
+    return b''.join(swapped)
+
 def get_command(data):
     if data:
         return data[3]
     else:
         return None
+
+def decode_func_codes(code):
+    names = []
+    for candidate in sorted(FN_CODE_MAP.keys()):
+        if code & candidate:
+            names.append(FN_CODE_MAP[candidate])
+
+    return names
 
 BUTTONS = ["C", "B", "A", "START", "UP", "DOWN", "LEFT", "RIGHT",
             "Z", "Y", "X", "D", "UP2", "DOWN2", "LEFT2", "RIGHT2"]
@@ -155,23 +162,23 @@ def load_image(filename):
     assert len(data) == 48 * 32 // 8
     return bytes(data)
 
+# result = decoded data
+# num_samples = number of useful (bit-generating) samples
+# recv_completed = no data cut off due to space constraints
+DecodedRx = collections.namedtuple('DecodedRx', ('result', 'num_samples', 'completed'))
 def debittify(bitstring):
     """
     The maple proxy sends a bitstring consisting of the state of the two pins sampled at 2MSPS. Decode these 
     back into bytes.
+    
+    We also want a sample count back from this, so return a DecodedRx.
     """
-    # the two bits are (maple5, maple1) and are stored in each byte in this way:
-    # 51515151
     def iter_bits():
-        # first byte: three bits
-        first = bitstring[0]
-        yield(first & 0x80, first & 0x40)
-        yield(first & 0x20, first & 0x10)
-        yield(first & 0x2, first & 0x1)
-        for byte in bitstring[1:]:
+        # Order of bits: 33 11 22 44
+        for byte in bitstring:
+            yield(byte & 0x20, byte & 0x10)
             yield(byte & 0x8, byte & 0x4)
             yield(byte & 0x80, byte & 0x40)
-            yield(byte & 0x20, byte & 0x10)
             yield(byte & 0x2, byte & 0x1)
 
     output = []
@@ -180,14 +187,16 @@ def debittify(bitstring):
 
     def add_bit(thebit):
         nonlocal accum, bitcount, output
-        if bitcount == 8:
-            output.append(accum)
-            bitcount = accum = 0
-
         accum <<= 1
         if thebit:
             accum |= 1
         bitcount += 1
+
+        if bitcount == 8:
+            output.append(accum)
+            bitcount = accum = 0
+
+        return bitcount == 0
 
     state = 0
     idx = 0
@@ -195,72 +204,98 @@ def debittify(bitstring):
     old_pin5 = 0
     started = True
     debug_bits_list = []
+    num_samples_all_high = 0  # in a row
+    samples_this_byte = 0  # useful at the end for calculating total number of samples.
     for pin5, pin1 in iter_bits():
         debug_bits = '%c%c' % ('1' if pin5 else '0', '1' if pin1 else '0')
 
-        if pin1 and pin5 and started:
-            # Skip the initial both-lines-high condition
-            continue
+        if pin1 and pin5:
+            if started:
+                # Skip the initial both-lines-high condition
+                continue
+            else:
+                num_samples_all_high += 1
+        else:
+            num_samples_all_high = 0
+
 
         started = False
-
         debug_this_time = [debug_bits]
 
+        added = False
         if old_pin1 and not pin1:
             debug_this_time.append(1)
-            add_bit(pin5)
-            if bitcount == 1 and output:
-                debug_this_time.append(output[-1])
+            added = add_bit(pin5)
+            if added:
+                debug_this_time.append(accum)
         if old_pin5 and not pin5:
             debug_this_time.append(5)
-            add_bit(pin1)
-            if bitcount == 1 and output:
-                debug_this_time.append(output[-1])
+            added = add_bit(pin1)
+            if added:
+                debug_this_time.append(accum)
+
+        if added:
+            debug_this_time.append(accum)
+
+        if added:
+            samples_this_byte = 0
+        else:
+            samples_this_byte += 1
 
         old_pin5 = pin5
         old_pin1 = pin1
 
         debug_bits_list.append(debug_this_time)
 
-#        if state == 0 and not pin1:
-#            add_bit(pin5)
-#            state = 1
-#        elif state == 1 and pin5:
-#            state = 2
-#        elif state == 2 and not pin5:
-#            add_bit(pin1)
-#            state = 3
-#        elif state == 3 and pin1:
-#            state = 0
-
     # debug:
-    for offset in range(0, len(debug_bits_list), 60):
-        end = min(offset + 60, len(debug_bits_list))
+    debug = False
+    if debug:
+        for offset in range(0, len(debug_bits_list), 60):
+            end = min(offset + 60, len(debug_bits_list))
 
-        for i in range(offset, end):
-            sys.stdout.write('%s ' % (debug_bits_list[i][0]))
+            for i in range(offset, end):
+                sys.stdout.write('%s ' % (debug_bits_list[i][0]))
 
-        sys.stdout.write('\n')
+            sys.stdout.write('\n')
 
-        for i in range(offset, end):
-            if len(debug_bits_list[i]) == 2:
-                sys.stdout.write(' %d ' % (debug_bits_list[i][1]))
-            else:
-                sys.stdout.write('   ')
+            for i in range(offset, end):
+                if len(debug_bits_list[i]) >= 2:
+                    sys.stdout.write('%s ' % ('^c' if debug_bits_list[i][1] == 1 else 'c^'))
+                else:
+                    sys.stdout.write('   ')
 
-        sys.stdout.write('\n')
+            sys.stdout.write('\n')
 
-        for i in range(offset, end):
-            if len(debug_bits_list[i]) == 3:
-                character = debug_bits_list[i][2]
-                sys.stdout.write(' %c ' % (character,) if 32 <= character <= 128 else '%02x ' % (character,))
-            else:
-                sys.stdout.write('   ')
+            for i in range(offset, end):
+                if len(debug_bits_list[i]) == 3:
+                    character = debug_bits_list[i][2]
+                    sys.stdout.write(' %c ' % (character,) if 32 <= character < 128 else '%02x ' % (character,))
+                else:
+                    sys.stdout.write('   ')
 
-        sys.stdout.write('\n')
+            sys.stdout.write('\n')
 
-    #print('debit', '{0:08b}{1:08b}{2:08b}{3:08b}'.format(output[0], output[1], output[2], output[3]))
-    return bytes(output)
+        #print('debit', '{0:08b}{1:08b}{2:08b}{3:08b}'.format(output[0], output[1], output[2], output[3]))
+        print('bitcount', bitcount)
+
+    # the recv was completed if at least the last IDLE_SAMPLES_INDICATING_COMPLETION samples
+    # are all '11'.
+    recv_completed = num_samples_all_high >= IDLE_SAMPLES_INDICATING_COMPLETION
+
+    if recv_completed:
+        # TODO: why?
+        output = output[:-1]
+
+    num_samples = (len(bitstring) * RAW_SAMPLES_PER_BYTE) - samples_this_byte
+    return DecodedRx(result=bytes(output), num_samples=num_samples, completed=recv_completed)
+
+def align_messages(prev, current):
+    return prev + current
+
+def calculate_recv_skip(samples_so_far):
+    " Calculate the amount to skip forward. "
+    samples_to_skip = max(0, samples_so_far - RX_SKIP_SAFETY_FACTOR)
+    return samples_to_skip // SKIP_LOOP_LENGTH
 
 class MapleProxy(object):
     def __init__(self, port=PORT):
@@ -270,7 +305,7 @@ class MapleProxy(object):
         total_sleep = 0
         while total_sleep < 5:
             print("are you there?")
-            self.handle.write(b'\x00') # are-you-there
+            self.handle.write(b'\x00\x00\x00') # are-you-there
             result = self.handle.read(1)
             if result == b'\x01':
                 break
@@ -285,9 +320,9 @@ class MapleProxy(object):
         if hasattr(self, 'handle'):
             self.handle.close()
     
-    def deviceInfo(self, address):
+    def deviceInfo(self, address, debug_filename=None):
         # cmd 1 = request device information
-        info_bytes = self.transact(CMD_INFO, address, b'')
+        info_bytes = self.transact(CMD_INFO, address, b'', debug_write_filename=debug_filename, allow_repeats=True)
         if not info_bytes:
             print("No device found at address:")
             print(hex(address))
@@ -298,6 +333,7 @@ class MapleProxy(object):
         info_bytes = info_bytes[4:] # Strip header
         print("Device information:")
         print("raw:", debug_hex(swapwords(info_bytes)), len(info_bytes))
+        #return True
         func, func_data_0, func_data_1, func_data_2, product_name,\
                 product_license =\
                 struct.unpack("<IIII32s60s", info_bytes[:108])
@@ -314,7 +350,19 @@ class MapleProxy(object):
         print("Power      :", standby_power)
         print("Power max  :", max_power)
         return True
-    
+
+    def readFlash(self, address, block, phase):
+        addr = (0 << 24) | (phase << 16) | block
+        cmd = struct.pack("<II", FN_MEMORY_CARD, addr)
+        while True:
+            info_bytes = self.transact(CMD_READ, address, cmd, None, allow_repeats=True)
+            data = info_bytes[12:]
+            data = swapwords(data)
+            if len(data) == 512 and get_command(info_bytes) == CMD_XFER_RESP:
+                break
+
+        return data
+
     def getCond(self, address, function):
         data = struct.pack("<I", function)
         info_bytes = self.transact(CMD_GET_COND, address, data)
@@ -352,15 +400,6 @@ class MapleProxy(object):
         print(info_bytes)
         return
 
-    def readFlash(self, address, block, phase):
-        addr = (0 << 24) | (phase << 16) | block
-        data = struct.pack("<II", FN_MEMORY_CARD, addr)
-        info_bytes = self.transact(CMD_READ, address, data)
-        assert get_command(info_bytes) == CMD_XFER_RESP
-        data = info_bytes[12:-1]
-        data = swapwords(data)
-        return data
-    
     def resetDevice(self, address):
         info_bytes = self.transact(CMD_RESET, address, b'')
         print_header(info_bytes[:4])
@@ -369,7 +408,7 @@ class MapleProxy(object):
     def getMemInfo(self, address):
         partition = 0x0
         data = struct.pack("<II", FN_MEMORY_CARD, partition << 24)
-        info_bytes = self.transact(CMD_GET_MEMINFO, address, data)
+        info_bytes = self.transact(CMD_GET_MEMINFO, address, data, allow_repeats=True)
         print_header(info_bytes[:4])
         return
         
@@ -388,12 +427,72 @@ class MapleProxy(object):
         print("  Dir size  :", dirsz)
         print("  Icon      :", icon)
         print("  Data size :", datasz)
-    
+
     def readController(self, address):
         data = struct.pack("<I", FN_CONTROLLER)
         info_bytes = self.transact(CMD_GET_COND, address, data)
         return info_bytes
         #print debug_hex(info_bytes)
+
+    def transact(self, command, recipient, data, debug_write_filename=None, allow_repeats=False):
+        # Construct a frame header.
+        sender = ADDRESS_DC
+        assert len(data) < 256, data
+        header = (command << 24) | (recipient << 16) | (sender << 8) | (len(data) // 4)
+        packet = struct.pack("<I", header) + data
+        packet += bytes([self.compute_checksum(packet)])
+
+        #print ('out', debug_hex(packet))
+        # Write the frame, wait for response.
+        completed = False
+        entire_message = b''
+        samples_so_far = 0
+
+        while True:
+            recv_skip = calculate_recv_skip(samples_so_far)
+            rx_response = self._transact_multiple(packet, recv_skip, num_tries=3 if allow_repeats else 1)
+            entire_message = align_messages(entire_message, rx_response.result)
+            if not allow_repeats or rx_response.completed:
+                break
+            samples_so_far += rx_response.num_samples
+
+        return entire_message
+
+    def _transact_multiple(self, packet, recv_skip, num_tries, debug_write_filename=None):
+        results = []
+        for retry in range(num_tries):
+            self.handle.write(bytes([len(packet)]))
+            self.handle.write(struct.pack('<H', recv_skip))  # recv skip
+            self.handle.write(packet)
+            num_bytes = self.handle.read(2)
+            if num_bytes:
+                num_bytes = struct.unpack(">H", num_bytes)[0]
+                raw_response = self.handle.read(num_bytes)
+                if debug_write_filename:
+                    with open(debug_write_filename, 'wb') as h:
+                        h.write(raw_response)
+                results.append(debittify(raw_response))
+
+        # Find the two which match.
+        if not results:
+            return None
+        elif len(results) == 1:
+            return results[0]
+        else:
+            # Find the best-attested result. If they're all different, just return the first result.
+            best_idx = 0
+            best_count = 0
+            for idx1 in range(len(results)):
+                current_count = 0
+                for idx2 in range(idx1, len(results)):
+                    if results[idx1] == results[idx2]:
+                        current_count += 1
+
+                if current_count > best_count:
+                    best_idx = idx1
+                    best_count = current_count
+
+            return results[best_idx]
 
     def compute_checksum(self, data):
         checksum = 0
@@ -401,51 +500,38 @@ class MapleProxy(object):
             checksum ^= datum
         return checksum
 
-    def transact(self, command, recipient, data):
-        # Construct a frame header.
-        sender = ADDRESS_DC
-        assert len(data) < 256
-        header = (command << 24) | (recipient << 16) | (sender << 8) | (len(data) // 4)
-        packet = struct.pack("<I", header) + data
-        packet += bytes([self.compute_checksum(packet)])
+def debug_dump(filename):
+    with open(filename, 'rb') as h:
+        raw_data = h.read()
 
-        #print ('out', debug_hex(packet))
-        # Write the frame, wait for response.
-        self.handle.write(bytes([len(packet)]))
-        self.handle.write(packet)
-        num_bytes = self.handle.read(2)
-        if num_bytes:
-            num_bytes = struct.unpack(">H", num_bytes)[0]
-            return debittify(self.handle.read(num_bytes))
-        else:
-            return None
-    
+    result = debittify(raw_data)
+    print("raw:", debug_hex(swapwords(result)), len(result))
+
 def test():
     parser = argparse.ArgumentParser()
-    parser.add_argument('-p', '--port', default=PORT)
-    parser.add_argument('image', nargs='?', default='astroboy.txt')
+    parser.add_argument('-p', '--port', default=None)
+    parser.add_argument('-d', '--debug-prefix', default=None)
     args = parser.parse_args()
 
-    image = load_image(args.image)
+    if args.port:
+        bus = MapleProxy(args.port)
 
-    bus = MapleProxy(args.port)
+        # Nothing will work before you do a deviceInfo on the controller.
+        # I guess this forces the controller to enumerate its devices.
+        debug_filename = '%s-controller' % (args.debug_prefix,) if args.debug_prefix else None
+        found_controller = bus.deviceInfo(ADDRESS_CONTROLLER, debug_filename=debug_filename)
+        if not found_controller:
+            print("Couldn't find controller.")
+            #return
 
-    # Nothing will work before you do a deviceInfo on the controller.
-    # I guess this forces the controller to enumerate its devices.
-    found_controller = bus.deviceInfo(ADDRESS_CONTROLLER)
-    if not found_controller:
-        print("Couldn't find controller.")
-        #return
+        debug_filename = '%s-vmu' % (args.debug_prefix,) if args.debug_prefix else None
+        found_vmu = bus.deviceInfo(ADDRESS_PERIPH1, debug_filename=debug_filename)
 
-    found_vmu = bus.deviceInfo(ADDRESS_PERIPH1)
-    #if found_vmu:
-    bus.writeLCD(ADDRESS_PERIPH1, image)
-
-    print("Play with the controller. Hit ctrl-c when done.")
-    while 1:
-        print_controller_info(bus.readController(ADDRESS_CONTROLLER))
-        time.sleep(1)
+        # read flash block 0
+        flash = bus.readFlash(ADDRESS_PERIPH1, 255, 0)
+        print('flash', flash, len(flash))
+    else:
+        debug_dump(args.debug_prefix + '-controller')
 
 if __name__ == '__main__':
     test()
-

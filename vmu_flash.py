@@ -61,6 +61,26 @@ def pad_to_block_size(data):
 
     return data
 
+def dump_hex(block):
+    for i in range(0, len(block), 16):
+        chunk = block[i : i + 16]
+        sys.stdout.write('%04x  ' % (i,))
+        for j, b in enumerate(chunk):
+            sys.stdout.write(format(b, '02x') + ' ')
+            if j == 7:
+                sys.stdout.write(' ')
+
+        sys.stdout.write('   ' * (16 - len(chunk)) + '     ')
+        if len(chunk) < 9:
+            sys.stdout.write(' ')
+
+        for b in chunk:
+            sys.stdout.write(chr(b) if 32 <= b < 127 else '.')
+
+        sys.stdout.write('\n')
+    sys.stdout.write('\n')
+
+
 def read_vmu_dump(fn):
     """
     Return a blocksize-padded image.
@@ -69,6 +89,13 @@ def read_vmu_dump(fn):
         image_data = h.read()
 
     return pad_to_block_size(image_data)
+
+def construct_8_3_filename(filename):
+    base, ext = os.path.splitext(os.path.basename(filename.upper()).replace(' ', '_'))
+    base = base[:8]
+    ext = ext[-3:]
+
+    return ('%-8s%-3s' % (base, ext)).encode('ascii') + b'\x00'
 
 def construct_fs_image(filename, data):
     """
@@ -87,9 +114,7 @@ def construct_fs_image(filename, data):
         # Construct a directory block
         data_length_blocks = len(data) // BLOCK_SIZE
 
-        filename = os.path.splitext(os.path.basename(filename))[0].upper().replace(' ', '_')
-        filename = bytes(filename, encoding='utf-8')
-        filename += b'\x00' * (12 - len(filename))
+        filename = construct_8_3_filename(filename)
 
         dir_entry = bytes([
             0xcc,     # file type: game
@@ -99,10 +124,12 @@ def construct_fs_image(filename, data):
             bcd_date + [
             data_length_blocks & 0xff,
             data_length_blocks >> 8,
-            0, 1      # header offset within file  --  nb only valid for games
+            1      # header offset within file (in blocks) --  nb only valid for games
         ])
 
         fs_image[DIRECTORY_BLOCK_IDX] = pad_to_block_size(dir_entry)
+
+        dump_hex(fs_image[DIRECTORY_BLOCK_IDX])
 
         # construct the FAT block
         fat_list = [0xfffc] * 256  # empty space initially
@@ -120,6 +147,8 @@ def construct_fs_image(filename, data):
         fat_list[ROOT_BLOCK_IDX] = 0xfffa
 
         fat_bytes = b''.join(struct.pack('<H', entry) for entry in fat_list)
+
+        dump_hex(fat_bytes)
         
         fs_image[FAT_BLOCK_IDX] = fat_bytes
 
@@ -127,21 +156,26 @@ def construct_fs_image(filename, data):
         root_block_list = [
             0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, # magic
             0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, # magic
-            0x0, 0x0, 0x0, 0x0, 0x0, # standard VMS colour
+            0x01, 0xff, 0xdf, 0x9f, 0x64
         ]
         root_block_list += [0 for _ in range(BLOCK_SIZE - len(root_block_list))]
         root_block_list[0x30: 0x38] = bcd_date
 
+        root_block_list[0x40] = 0xff  # unknown
+        root_block_list[0x44] = 0xff  # unknown
         root_block_list[0x46] = FAT_BLOCK_IDX  # fat location, low byte
         root_block_list[0x48] = 1  # fat size, low byte
         root_block_list[0x4a] = DIRECTORY_BLOCK_IDX  # first directory block, low byte
         root_block_list[0x4c] = 13  # directory size in blocks
         root_block_list[0x4e] = 1  # icon shape
         root_block_list[0x50] = 200  # number of user blocks
+        root_block_list[0x52] = 0x1f  # unknown
 
         root_block = bytes(root_block_list)
         assert len(root_block) == BLOCK_SIZE
         fs_image[ROOT_BLOCK_IDX] = root_block
+
+        dump_hex(root_block)
 
     return fs_image
 
