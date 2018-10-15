@@ -135,7 +135,13 @@ def load_image(filename):
     data = [0] * ((48 * 32) // 8)
     x = y = 0
     stride = 48
-    lines = open(filename, 'r').readlines()
+    if hasattr(filename, 'readlines'):
+        # Treat it as a handle
+        lines = filename.readlines()
+    else:
+        with open(filename, 'r') as handle:
+            lines = handle.readlines()
+
     lines = lines[-1::-1]
     for line in lines:
         while line[-1] in '\r\n':
@@ -333,7 +339,6 @@ class MapleProxy(object):
         info_bytes = info_bytes[4:] # Strip header
         print("Device information:")
         print("raw:", debug_hex(swapwords(info_bytes)), len(info_bytes))
-        #return True
         func, func_data_0, func_data_1, func_data_2, product_name,\
                 product_license =\
                 struct.unpack("<IIII32s60s", info_bytes[:108])
@@ -459,7 +464,8 @@ class MapleProxy(object):
         return entire_message
 
     def _transact_multiple(self, packet, recv_skip, num_tries, debug_write_filename=None):
-        results = []
+        prev_response = None
+        response = None
         for retry in range(num_tries):
             self.handle.write(bytes([len(packet)]))
             self.handle.write(struct.pack('<H', recv_skip))  # recv skip
@@ -471,29 +477,13 @@ class MapleProxy(object):
                 if debug_write_filename:
                     with open(debug_write_filename, 'wb') as h:
                         h.write(raw_response)
-                results.append(debittify(raw_response))
 
-        # Find the two which match.
-        if not results:
-            return None
-        elif len(results) == 1:
-            return results[0]
-        else:
-            # Find the best-attested result. If they're all different, just return the first result.
-            best_idx = 0
-            best_count = 0
-            for idx1 in range(len(results)):
-                current_count = 0
-                for idx2 in range(idx1, len(results)):
-                    if results[idx1] == results[idx2]:
-                        current_count += 1
+                response = debittify(raw_response)
+                if prev_response and prev_response.result == response.result:
+                    break
 
-                if current_count > best_count:
-                    best_idx = idx1
-                    best_count = current_count
-
-            return results[best_idx]
-
+        return response
+                
     def compute_checksum(self, data):
         checksum = 0
         for datum in data:
@@ -526,10 +516,6 @@ def test():
 
         debug_filename = '%s-vmu' % (args.debug_prefix,) if args.debug_prefix else None
         found_vmu = bus.deviceInfo(ADDRESS_PERIPH1, debug_filename=debug_filename)
-
-        # read flash block 0
-        flash = bus.readFlash(ADDRESS_PERIPH1, 255, 0)
-        print('flash', flash, len(flash))
     else:
         debug_dump(args.debug_prefix + '-controller')
 
