@@ -1,6 +1,11 @@
 Wiring
 ------
-You need to connect the red and white wires (clock and data lines) to two separate ports. I used a breadboard for this, but you could also just solder an extra wire on.
+You need to connect the red and white wires (clock and data lines) to two separate ports. The short
+explanation is this reduces the amount of bit twiddling required when reading, resulting in pretty
+consistent reads on an 16MHz Arduino. [The blog post](https://code.lardcave.net/2018/10/15/1/) has a
+longer explanation.
+
+I used a breadboard for this, but you could also just solder an extra wire on.
 
 * Red wire:
 	PORTB0 (Pin 8 on Duemilanove)
@@ -10,6 +15,10 @@ You need to connect the red and white wires (clock and data lines) to two separa
 	PORTC3 (Analogue Pin 3 on Duemilanove)
 * Blue wire: +5V
 * GND (unshielded): GND
+
+Handy diagram:
+
+<img src="DreamcastMapleBusConnected.svg" width=600>
 
 Converting images
 -----------------
