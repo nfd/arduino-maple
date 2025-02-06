@@ -126,9 +126,9 @@ void debittify()
 	debittify_state.bitcount = 0;
 
 	bool at_start = true;
-    int num_samples_all_high = 0;
-    bool old_pin1 = true;
-    bool old_pin5 = false;
+	int num_samples_all_high = 0;
+	bool old_pin1 = true;
+	bool old_pin5 = false;
 
 	for(int i = 0; i < packet.data_len_rx; i++) {
 		uint8_t sample = packet.data[i];
@@ -141,30 +141,30 @@ void debittify()
 		};
 
 		for(int j=0; j<4; j++) {
-            bool pin5 = pins[j][0];
-            bool pin1 = pins[j][1];
-            
-            if (pin1 && pin5) {
-                if (at_start) {
+			bool pin5 = pins[j][0];
+			bool pin1 = pins[j][1];
+
+			if (pin1 && pin5) {
+				if (at_start) {
 					// Skip initial both-lines-high condition
-                    continue;
-                }
-                num_samples_all_high++;
-            } else {
-                num_samples_all_high = 0;
-            }
+					continue;
+				}
+				num_samples_all_high++;
+			} else {
+				num_samples_all_high = 0;
+			}
 
-            at_start = false;
+			at_start = false;
 
-            if (old_pin1 && !pin1) {
-                _add_bit(pin5);
-            }
-            if (old_pin5 && !pin5) {
-                _add_bit(pin1);
-            }
+			if (old_pin1 && !pin1) {
+				_add_bit(pin5);
+			}
+			if (old_pin5 && !pin5) {
+				_add_bit(pin1);
+			}
 
-            old_pin5 = pin5;
-            old_pin1 = pin1;
+			old_pin5 = pin5;
+			old_pin1 = pin1;
 		}
 	}
 
