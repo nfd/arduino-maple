@@ -89,7 +89,7 @@ clean:
 	rm app.*
  
 printsize:
-	avr-size --format=avr --mcu=$(MMCU) app.elf
+	avr-size app.elf
 
 
 
