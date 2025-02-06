@@ -71,7 +71,7 @@ log = print
 
 def debug_hex(packet):
     def ascii(b):
-        return ' %c' % (b,) if 32 <= b <= 127 else '%02x' % (b,)
+        return ' %c' % (b,) if 32 < b < 127 else '%02x' % (b,)
 
     #display = ['%02x %c ' % (item, ascii(item)) for item in packet]
     #return ''.join(display)
@@ -111,10 +111,15 @@ def decode_func_codes(code):
 BUTTONS = ["C", "B", "A", "START", "UP", "DOWN", "LEFT", "RIGHT",
             "Z", "Y", "X", "D", "UP2", "DOWN2", "LEFT2", "RIGHT2"]
 def print_controller_info(data):
-    print_header(data)
+    if len(data) != 17:
+        print(f"Invalid controller data length {len(data)}")
+        print(debug_hex(data))
+        return
+
     data = data[4:]  # Header
     data = data[4:]  # Func
     data = data[:-1] # CRC
+
     data = swapwords(data)
     buttons = struct.unpack("<H", data[:2])[0]
     buttons = ~buttons & 0xffff
@@ -122,14 +127,7 @@ def print_controller_info(data):
     for bit, name in enumerate(BUTTONS):
         if buttons & (1 << bit):
             button_names.append(name)
-    print("Ltrig", data[3], end=' ')
-    print("Rtrig", data[2], end=' ')
-    print("Joy X", data[4], end=' ')
-    print("Joy Y", data[5], end=' ')
-    print("Joy X2", data[6], end=' ')
-    print("Joy Y2", data[7], end=' ')
-    print(", ".join(button_names))
-    #print debug_hex(data)
+    print(f"L: {data[3]:02x} R: {data[2]:02x} X: {data[4]:02x} Y: {data[5]:02x} X2: {data[6]:02x} Y2: {data[7]:02x} {', '.join(button_names)}")
 
 def load_image(filename):
     data = [0] * ((48 * 32) // 8)
@@ -208,7 +206,7 @@ def debittify(bitstring):
     idx = 0
     old_pin1 = 1
     old_pin5 = 0
-    started = True
+    at_start = True
     debug_bits_list = []
     num_samples_all_high = 0  # in a row
     samples_this_byte = 0  # useful at the end for calculating total number of samples.
@@ -216,7 +214,7 @@ def debittify(bitstring):
         debug_bits = '%c%c' % ('1' if pin5 else '0', '1' if pin1 else '0')
 
         if pin1 and pin5:
-            if started:
+            if at_start:
                 # Skip the initial both-lines-high condition
                 continue
             else:
@@ -224,8 +222,7 @@ def debittify(bitstring):
         else:
             num_samples_all_high = 0
 
-
-        started = False
+        at_start = False
         debug_this_time = [debug_bits]
 
         added = False
@@ -287,10 +284,6 @@ def debittify(bitstring):
     # the recv was completed if at least the last IDLE_SAMPLES_INDICATING_COMPLETION samples
     # are all '11'.
     recv_completed = num_samples_all_high >= IDLE_SAMPLES_INDICATING_COMPLETION
-
-    if recv_completed:
-        # TODO: why?
-        output = output[:-1]
 
     num_samples = (len(bitstring) * RAW_SAMPLES_PER_BYTE) - samples_this_byte
     return DecodedRx(result=bytes(output), num_samples=num_samples, completed=recv_completed)
@@ -456,6 +449,9 @@ class MapleProxy(object):
         while True:
             recv_skip = calculate_recv_skip(samples_so_far)
             rx_response = self._transact_multiple(packet, recv_skip, num_tries=3 if allow_repeats else 1)
+            if not rx_response:
+                return None
+
             entire_message = align_messages(entire_message, rx_response.result)
             if not allow_repeats or rx_response.completed:
                 break
@@ -472,13 +468,15 @@ class MapleProxy(object):
             self.handle.write(packet)
             num_bytes = self.handle.read(2)
             if num_bytes:
+                recv_completed = self.handle.read(1) != b'\x00'
                 num_bytes = struct.unpack(">H", num_bytes)[0]
                 raw_response = self.handle.read(num_bytes)
                 if debug_write_filename:
                     with open(debug_write_filename, 'wb') as h:
                         h.write(raw_response)
 
-                response = debittify(raw_response)
+                # response = debittify(raw_response)
+                response = DecodedRx(result=raw_response, num_samples=len(raw_response) * RAW_SAMPLES_PER_BYTE, completed=recv_completed)
                 if prev_response and prev_response.result == response.result:
                     break
 
@@ -515,7 +513,13 @@ def test():
             #return
 
         debug_filename = '%s-vmu' % (args.debug_prefix,) if args.debug_prefix else None
-        found_vmu = bus.deviceInfo(ADDRESS_PERIPH1, debug_filename=debug_filename)
+        # found_vmu = bus.deviceInfo(ADDRESS_PERIPH1, debug_filename=debug_filename)
+
+        while True:
+            controller_data = bus.readController(ADDRESS_CONTROLLER)
+            if controller_data:
+                print_controller_info(controller_data)
+                time.sleep(0.2)
     else:
         debug_dump(args.debug_prefix + '-controller')
 
