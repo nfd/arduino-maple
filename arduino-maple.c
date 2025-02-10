@@ -11,6 +11,7 @@
 #include <util/setbaud.h>
 
 #define IDLE_SAMPLES_INDICATING_COMPLETION 8
+#define RAW_SAMPLES_PER_BYTE 4
 
 FILE uart;
 
@@ -106,17 +107,22 @@ unsigned char compute_checksum(unsigned char data_bytes)
 struct {
 	uint8_t *output;
 	uint8_t bitcount;
+	uint8_t accum;
 } debittify_state;
 
 static void _add_bit(int thebit)
 {
-	*(debittify_state.output) <<= 1;
-	*(debittify_state.output) |= (thebit & 1);
+	debittify_state.accum <<= 1;
+	if(thebit) {
+		debittify_state.accum |= 1;
+	}
 	debittify_state.bitcount += 1;
 
 	if(debittify_state.bitcount == 8) {
+		(*debittify_state.output) = debittify_state.accum;
 		debittify_state.output ++;
 		debittify_state.bitcount = 0;
+		debittify_state.accum = 0;
 	}
 }
 
@@ -124,13 +130,14 @@ void debittify()
 {
 	debittify_state.output = packet.data;
 	debittify_state.bitcount = 0;
+	debittify_state.accum = 0;
 
 	bool at_start = true;
 	int num_samples_all_high = 0;
 	bool old_pin1 = true;
 	bool old_pin5 = false;
 
-	for(int i = 0; i < packet.data_len_rx; i++) {
+	for(int i = 0; i < packet.data_len_rx && (num_samples_all_high < IDLE_SAMPLES_INDICATING_COMPLETION); i++) {
 		uint8_t sample = packet.data[i];
 
 		uint8_t pins[4][2] = {
@@ -154,6 +161,8 @@ void debittify()
 				num_samples_all_high = 0;
 			}
 
+			// We're only at the start if pin1 && pin5 && at_start -- in which case we wouldn't get
+			// here.
 			at_start = false;
 
 			if (old_pin1 && !pin1) {

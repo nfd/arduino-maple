@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 # copy of large chunks of maple.py for debug / testing purposes.
+import itertools
 import sys
 import struct
-import select
 import serial
 import time
 import argparse
@@ -61,8 +61,8 @@ IDLE_SAMPLES_INDICATING_COMPLETION = 8
 
 SKIP_LOOP_LENGTH = 2  # size is given in samples
 
-# Safety factor for skip loop to give us a chance to align subsequences -- turns out not to be needed
-RX_SKIP_SAFETY_FACTOR = 0  # samples
+# Safety factor for skip loop to give us a chance to align subsequences
+RX_SKIP_SAFETY_FACTOR = 6  # samples
 
 # Number of samples stored per byte.
 RAW_SAMPLES_PER_BYTE = 4
@@ -71,11 +71,23 @@ log = print
 
 def debug_hex(packet):
     def ascii(b):
-        return ' %c' % (b,) if 32 < b < 127 else '%02x' % (b,)
+        return chr(b) if 32 < b < 127 else '.'
 
     #display = ['%02x %c ' % (item, ascii(item)) for item in packet]
     #return ''.join(display)
-    return ''.join(ascii(item) for item in packet)
+    #return ''.join(ascii(item) for item in packet)
+    dump = []
+    idx = 0
+    for line in itertools.batched(packet, 16):
+        hexdump = '%08x: ' % (idx,)
+        hexdump = ' '.join('%02x' % (item,) for item in line)
+        hexdump += ' ' * (48 - len(hexdump))
+        hexdump += '  '
+        hexdump += ''.join(ascii(item) for item in line)
+        dump.append(hexdump)
+        idx += 16
+
+    return '\n'.join(dump)
 
 def debug_txt(packet):
     return bytes([c if int(c) >= ord(' ') and int(c) <= ord('z') else ord('.') for c in packet])
@@ -319,9 +331,9 @@ class MapleProxy(object):
         if hasattr(self, 'handle'):
             self.handle.close()
     
-    def deviceInfo(self, address, debug_filename=None):
+    def deviceInfo(self, address):
         # cmd 1 = request device information
-        info_bytes = self.transact(CMD_INFO, address, b'', debug_write_filename=debug_filename, allow_repeats=True)
+        info_bytes = self.transact(CMD_INFO, address, b'', allow_repeats=True)
         if not info_bytes:
             print("No device found at address:")
             print(hex(address))
@@ -353,9 +365,11 @@ class MapleProxy(object):
         addr = (0 << 24) | (phase << 16) | block
         cmd = struct.pack("<II", FN_MEMORY_CARD, addr)
         while True:
-            info_bytes = self.transact(CMD_READ, address, cmd, None, allow_repeats=True)
+            info_bytes = self.transact(CMD_READ, address, cmd, allow_repeats=True)
             data = info_bytes[12:]
             data = swapwords(data)
+            print('got data, len', len(data))
+            assert len(data) <= 512, f"Data too long: {len(data)}"
             if len(data) == 512 and get_command(info_bytes) == CMD_XFER_RESP:
                 break
 
@@ -432,7 +446,7 @@ class MapleProxy(object):
         return info_bytes
         #print debug_hex(info_bytes)
 
-    def transact(self, command, recipient, data, debug_write_filename=None, allow_repeats=False):
+    def transact(self, command, recipient, data, allow_repeats=False):
         # Construct a frame header.
         sender = ADDRESS_DC
         assert len(data) < 256, data
@@ -442,15 +456,16 @@ class MapleProxy(object):
 
         #print ('out', debug_hex(packet))
         # Write the frame, wait for response.
-        completed = False
         entire_message = b''
         samples_so_far = 0
 
         while True:
             recv_skip = calculate_recv_skip(samples_so_far)
-            rx_response = self._transact_multiple(packet, recv_skip, num_tries=3 if allow_repeats else 1)
+            rx_response = self._transact_multiple(packet, recv_skip, max_tries=10) if allow_repeats else self._transact_once(packet, recv_skip)
             if not rx_response:
                 return None
+
+            print('rx', rx_response, recv_skip)
 
             entire_message = align_messages(entire_message, rx_response.result)
             if not allow_repeats or rx_response.completed:
@@ -459,28 +474,65 @@ class MapleProxy(object):
 
         return entire_message
 
-    def _transact_multiple(self, packet, recv_skip, num_tries, debug_write_filename=None):
-        prev_response = None
-        response = None
-        for retry in range(num_tries):
-            self.handle.write(bytes([len(packet)]))
-            self.handle.write(struct.pack('<H', recv_skip))  # recv skip
-            self.handle.write(packet)
-            num_bytes = self.handle.read(2)
-            if num_bytes:
-                recv_completed = self.handle.read(1) != b'\x00'
-                num_bytes = struct.unpack(">H", num_bytes)[0]
-                raw_response = self.handle.read(num_bytes)
-                if debug_write_filename:
-                    with open(debug_write_filename, 'wb') as h:
-                        h.write(raw_response)
+    def _transact_multiple(self, packet, recv_skip, max_tries):
+        """
+        Try up to 'max_tries' times to get a 51% majority match for each byte in the response.
+        """
+        responses = []
 
-                # response = debittify(raw_response)
-                response = DecodedRx(result=raw_response, num_samples=len(raw_response) * RAW_SAMPLES_PER_BYTE, completed=recv_completed)
-                if prev_response and prev_response.result == response.result:
+        def majority_match():
+            """
+            Return the canonical response if there is one, otherwise None.
+            """
+            idx = 0
+            canonical_raw = []
+            while True:
+                all_bytes = {}
+                for response in responses:
+                    if idx < len(response.result):
+                        byte = response.result[idx]
+                        all_bytes[byte] = all_bytes.get(byte, 0) + 1
+
+                if not all_bytes:
                     break
 
-        return response
+                for byte, count in all_bytes.items():
+                    if count > len(responses) // 2:
+                        canonical_raw.append(byte)
+                        break
+                else:
+                    return None
+
+                idx += 1
+
+            return bytes(canonical_raw)
+
+        total_length = 0
+        for retry in range(max_tries):
+            new_response = self._transact_once(packet, recv_skip)
+            total_length += len(new_response.result)
+            responses.append(new_response)
+
+            print(debug_hex(new_response.result))
+
+            if len(responses) > 1 and (canonical_raw := majority_match()):
+                return DecodedRx(result=canonical_raw, num_samples=len(canonical_raw) * RAW_SAMPLES_PER_BYTE, completed=responses[0].completed)
+
+        raise Exception("Failed to get a majority match")
+
+    def _transact_once(self, packet, recv_skip):
+        self.handle.write(bytes([len(packet)]))
+        self.handle.write(struct.pack('<H', recv_skip))  # recv skip
+        self.handle.write(packet)
+        num_bytes = self.handle.read(2)
+        if num_bytes:
+            recv_completed = self.handle.read(1) != b'\x00'
+            num_bytes = struct.unpack(">H", num_bytes)[0]
+            raw_response = self.handle.read(num_bytes)
+
+            return DecodedRx(result=raw_response, num_samples=len(raw_response) * RAW_SAMPLES_PER_BYTE, completed=recv_completed)
+
+        return DecodedRx(result=b'', num_samples=0, completed=True)
                 
     def compute_checksum(self, data):
         checksum = 0
@@ -506,14 +558,12 @@ def test():
 
         # Nothing will work before you do a deviceInfo on the controller.
         # I guess this forces the controller to enumerate its devices.
-        debug_filename = '%s-controller' % (args.debug_prefix,) if args.debug_prefix else None
-        found_controller = bus.deviceInfo(ADDRESS_CONTROLLER, debug_filename=debug_filename)
+        found_controller = bus.deviceInfo(ADDRESS_CONTROLLER)
         if not found_controller:
             print("Couldn't find controller.")
             #return
 
-        debug_filename = '%s-vmu' % (args.debug_prefix,) if args.debug_prefix else None
-        # found_vmu = bus.deviceInfo(ADDRESS_PERIPH1, debug_filename=debug_filename)
+        # found_vmu = bus.deviceInfo(ADDRESS_PERIPH1)
 
         while True:
             controller_data = bus.readController(ADDRESS_CONTROLLER)
